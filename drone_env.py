@@ -120,6 +120,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in ["lin_vel", "ang_vel", "distance_to_goal"]
         }
+        self._cumulative_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
+        # Completed episode statistics (updated when episodes end)
+        self._completed_episode_lengths: list[int] = []
+        self._completed_episode_rewards: list[float] = []
 
         # Store nominal (original) dynamics parameters
         self._nominal_thrust_coefficients = torch.tensor(params['thrust_coefficients'], device=self.device, dtype=torch.float32)
@@ -196,6 +201,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Compute rewards
         self.rewards, rewards_dict = self._get_rewards()
 
+        # Accumulate rewards for episode tracking
+        self._cumulative_rewards += self.rewards
+
         # Check for termination
         self.terminals, self.truncations = self._get_dones()
 
@@ -205,17 +213,33 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Handle resets
         reset_envs = torch.where(self.terminals | self.truncations)[0]
         if len(reset_envs) > 0:
+            # Store completed episode stats before resetting
+            for env_idx in reset_envs:
+                self._completed_episode_lengths.append(self.episode_length_buf[env_idx].item())
+                self._completed_episode_rewards.append(self._cumulative_rewards[env_idx].item())
             self._reset_idx(reset_envs)
 
         # Compute reward statistics across all environments
         info = {
             "mean_reward": self.rewards.mean().item(),
-            "mean_length": self.episode_length_buf.float().mean().item()
         }
 
         # Add mean for each reward component
         for key, value in rewards_dict.items():
             info[f"mean_{key}"] = value.mean().item()
+
+        # Add completed episode statistics if any episodes finished
+        if self._completed_episode_lengths:
+            info["episode_length_min"] = min(self._completed_episode_lengths)
+            info["episode_length_max"] = max(self._completed_episode_lengths)
+            info["episode_length_mean"] = sum(self._completed_episode_lengths) / len(self._completed_episode_lengths)
+            info["episode_reward_min"] = min(self._completed_episode_rewards)
+            info["episode_reward_max"] = max(self._completed_episode_rewards)
+            info["episode_reward_mean"] = sum(self._completed_episode_rewards) / len(self._completed_episode_rewards)
+            info["episodes_completed"] = len(self._completed_episode_lengths)
+            # Clear the lists after reporting
+            self._completed_episode_lengths.clear()
+            self._completed_episode_rewards.clear()
 
         self.infos = [info]
         return (self.observations, self.rewards, self.terminals,
@@ -339,6 +363,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.episode_length_buf[env_ids] = 0
         self._actions[env_ids] = 0.0
         self._rotor_speeds[env_ids] = 0.0
+        self._cumulative_rewards[env_ids] = 0.0
 
         # Reset episode sums
         for key in self._episode_sums.keys():
