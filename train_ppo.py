@@ -61,10 +61,6 @@ def train(args):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
 
-    # Create environment creator (each env simulates 1 quadcopter)
-    env_creator = make_env_creator(
-    )
-
     # Create vectorized environment (PufferLib creates multiple env copies)
     vecenv = QuadcopterEnv(
         num_envs=args.num_envs,
@@ -86,15 +82,19 @@ def train(args):
     print(f"Action space: {vecenv.single_action_space.shape}")
     print(f"Total timesteps: {args.total_timesteps}")
 
-    print(f"Training PPO agent on {args.num_envs} parallel environments")
-    print(f"Observation space: {vecenv.single_observation_space.shape}")
-    print(f"Action space: {vecenv.single_action_space.shape}")
-    print(f"Total timesteps: {args.total_timesteps}")
-
+    # Load base config and override with command-line arguments
     config = pufferl.load_config('default')
-    config['train']['env'] = "l2f drone"
-    config['train']['batch_size'] = 8192
-    config['train']['bptt_horizon'] = 'auto'
+    train_config = config['train']
+
+
+    train_config['env'] = "l2f drone"
+    # Sampling and batch parameters
+    train_config['total_timesteps'] = args.total_timesteps
+    train_config['batch_size'] = args.num_envs * 8
+    train_config['bptt_horizon'] = 'auto'
+    train_config['update_epochs'] = 8
+
+    # PPO hyperparameters
 
     # Create trainer
     logger = WandbLogger({
@@ -102,7 +102,7 @@ def train(args):
         'wandb_group': 'sim2sim',
         'tag': 'my_tag'
     })
-    trainer = pufferl.PuffeRL(config['train'], vecenv, policy, logger)
+    trainer = pufferl.PuffeRL(train_config, vecenv, policy, logger)
 
     # Training loop
     while trainer.global_step < args.total_timesteps:
