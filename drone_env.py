@@ -222,7 +222,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.observations = self._get_observations()
 
         # Compute rewards
-        self.rewards = self._get_rewards()
+        self.rewards, rewards_dict = self._get_rewards()
 
         # Check for termination
         self.terminals, self.truncations = self._get_dones()
@@ -235,7 +235,16 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         if len(reset_envs) > 0:
             self._reset_idx(reset_envs)
 
-        self.infos = [dict()]
+        # Compute reward statistics across all environments
+        info = {
+            "mean_reward": self.rewards.mean().item(),
+        }
+
+        # Add mean for each reward component
+        for key, value in rewards_dict.items():
+            info[f"mean_{key}"] = value.mean().item()
+
+        self.infos = [info]
         return (self.observations, self.rewards, self.terminals,
             self.truncations, self.infos)
 
@@ -300,8 +309,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         return obs
 
-    def _get_rewards(self) -> torch.Tensor:
-        """Compute rewards for all environments."""
+    def _get_rewards(self) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Compute rewards for all environments.
+
+        Returns:
+            Tuple of (total_reward, rewards_dict) where rewards_dict contains
+            individual reward components for each environment.
+        """
         # Get velocity in body frame for reward calculation
         R = quaternion_to_rotation_matrix(self._quaternion)
         velocity_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), self._velocity)
@@ -322,7 +336,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         for key, value in rewards.items():
             self._episode_sums[key] += value
 
-        return reward
+        return reward, rewards
 
     def _get_dones(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Check for episode termination."""
