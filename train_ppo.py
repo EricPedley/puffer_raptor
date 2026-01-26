@@ -88,13 +88,33 @@ def train(args):
 
 
     train_config['env'] = "l2f drone"
-    # Sampling and batch parameters
+
+    # Sampling and batch parameters (matching SKRL config)
+    # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
-    train_config['batch_size'] = args.num_envs * 8
+    train_config['batch_size'] = args.num_envs * 32  # SKRL rollouts=32
     train_config['bptt_horizon'] = 'auto'
+
+    # SKRL: learning_epochs=8
     train_config['update_epochs'] = 8
 
-    # PPO hyperparameters
+    # SKRL: mini_batches=8, so minibatch_size = batch_size / 8
+    # With num_envs=4096, batch=131072, minibatch=16384
+    train_config['minibatch_size'] = (args.num_envs * 32) // 8
+
+    # PPO hyperparameters (matching SKRL config)
+    train_config['gamma'] = 0.99              # SKRL: discount_factor
+    train_config['gae_lambda'] = 0.95         # SKRL: lambda
+    train_config['clip_coef'] = 0.2           # SKRL: ratio_clip
+    train_config['vf_clip_coef'] = 0.2        # SKRL: value_clip
+    train_config['vf_coef'] = 2.0             # SKRL: value_loss_scale
+    train_config['ent_coef'] = 0.0            # SKRL: entropy_loss_scale
+    train_config['max_grad_norm'] = 1.0       # SKRL: grad_norm_clip
+
+    # Optimizer (SKRL uses Adam with lr=5e-4)
+    train_config['optimizer'] = 'adam'
+    train_config['learning_rate'] = 5.0e-04   # SKRL: learning_rate
+    train_config['anneal_lr'] = True          # SKRL uses KLAdaptiveLR, we use cosine
 
     # Create trainer
     logger = WandbLogger({
@@ -150,7 +170,7 @@ def main():
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
-    parser.add_argument("--total-timesteps", type=int, default=10_000_000, help="Total training timesteps")
+    parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
 
     # Logging and checkpointing
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
