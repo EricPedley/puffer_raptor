@@ -219,24 +219,25 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._integrate_physics(total_thrust_body, torque_body)
 
         # Get observations
-        obs = self._get_observations()
+        self.observations = self._get_observations()
 
         # Compute rewards
-        rewards = self._get_rewards()
+        self.rewards = self._get_rewards()
 
         # Check for termination
-        terminated, truncated = self._get_dones()
+        self.terminals, self.truncations = self._get_dones()
 
         # Update episode length
         self.episode_length_buf += 1
 
         # Handle resets
-        reset_envs = torch.where(terminated | truncated)[0]
+        reset_envs = torch.where(self.terminals | self.truncations)[0]
         if len(reset_envs) > 0:
             self._reset_idx(reset_envs)
 
-        info = [dict()]
-        return obs, rewards, terminated, truncated, info
+        self.infos = [dict()]
+        return (self.observations, self.rewards, self.terminals,
+            self.truncations, self.infos)
 
     def _integrate_physics(self, thrust_body: torch.Tensor, torque_body: torch.Tensor):
         """Integrate quadcopter dynamics using Euler integration."""
@@ -254,9 +255,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         I_omega = self._inertia * self._angular_velocity
         gyroscopic = torch.cross(self._angular_velocity, I_omega, dim=-1)
         angular_acc = self._inertia_inv * (torque_body - gyroscopic)
+        assert not torch.isinf(angular_acc).any().item()
 
         # Update angular velocity
-        self._angular_velocity += angular_acc * self.dt
+        self._angular_velocity = torch.clamp(self._angular_velocity + angular_acc * self.dt, -1e9, 1e9)
+        assert not torch.isinf(self._angular_velocity).any().item()
 
         # Update quaternion
         # dq/dt = 0.5 * q * omega_quat
@@ -265,10 +268,12 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._angular_velocity
         ], dim=-1)
         q_dot = 0.5 * quaternion_multiply(self._quaternion, omega_quat)
+        assert not torch.isnan(q_dot).any().item()
         self._quaternion += q_dot * self.dt
 
         # Normalize quaternion
         self._quaternion = self._quaternion / torch.norm(self._quaternion, dim=-1, keepdim=True)
+        assert not torch.isnan(self._quaternion).any().item()
 
     def _get_observations(self) -> np.ndarray:
         """Compute observations for all environments."""
@@ -383,3 +388,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._velocity[env_ids] = 0.0
         self._quaternion[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
         self._angular_velocity[env_ids] = 0.0
+
+    def close(self):
+        pass

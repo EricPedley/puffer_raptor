@@ -6,22 +6,23 @@ import torch
 import pufferlib
 import pufferlib.vector
 from pufferlib import pufferl
+from pufferlib.pufferl import WandbLogger
 from pufferlib.emulation import GymnasiumPufferEnv
 from drone_env import QuadcopterEnv
-
+from export import export_weights
 
 class Policy(torch.nn.Module):
     """Simple MLP policy for continuous control."""
-    def __init__(self, env, hidden_size=32):
+    def __init__(self, env, hidden_size):
         super().__init__()
         obs_shape = env.single_observation_space.shape[0]
         action_shape = env.single_action_space.shape[0]
 
         self.net = torch.nn.Sequential(
             pufferlib.pytorch.layer_init(torch.nn.Linear(obs_shape, hidden_size)),
-            torch.nn.Tanh(),
+            torch.nn.ELU(),
             pufferlib.pytorch.layer_init(torch.nn.Linear(hidden_size, hidden_size)),
-            torch.nn.Tanh(),
+            torch.nn.ELU(),
         )
         self.action_mean = pufferlib.pytorch.layer_init(torch.nn.Linear(hidden_size, action_shape), std=0.01)
         self.action_logstd = torch.nn.Parameter(torch.zeros(1, action_shape))
@@ -94,7 +95,12 @@ def train(args):
     config['train']['bptt_horizon'] = 'auto'
 
     # Create trainer
-    trainer = pufferl.PuffeRL(config['train'], vecenv, policy)
+    logger = WandbLogger({
+        'wandb_project': 'puffer_raptor',
+        'wandb_group': 'sim2sim',
+        'tag': 'my_tag'
+    })
+    trainer = pufferl.PuffeRL(config['train'], vecenv, policy, logger)
 
     # Training loop
     while trainer.global_step < args.total_timesteps:
@@ -120,6 +126,7 @@ def train(args):
         'policy_state_dict': policy.state_dict(),
         'global_step': trainer.global_step,
     }, final_path)
+    export_weights(policy, 'neural_network.c')
     print(f"Training complete! Saved final model to {final_path}")
 
     trainer.print_dashboard()
@@ -130,7 +137,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=512, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=4096, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="my_quad_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=500, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
@@ -140,7 +147,7 @@ def main():
     parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
 
     # Training parameters
-    parser.add_argument("--hidden-size", type=int, default=256, help="Hidden layer size")
+    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=10_000_000, help="Total training timesteps")
 
     # Logging and checkpointing
