@@ -9,6 +9,13 @@ from typing import Optional, Tuple, Dict, Any
 import gymnasium
 import pufferlib
 
+try:
+    import rerun as rr
+    from logging_utils import log_drone_pose
+    HAS_RERUN = True
+except ImportError:
+    HAS_RERUN = False
+
 def quaternion_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     """Multiply two quaternions (w, x, y, z format)."""
     w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
@@ -87,6 +94,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.dynamics_randomization_delta = dynamics_randomization_delta
         self.render_mode = render_mode
 
+        # Initialize rerun logging if rendering in human mode
+        if self.render_mode == "human" and HAS_RERUN:
+            rr.init("quadcopter_env", spawn=True)
+
         # Define action and observation spaces
         self.action_space = self.single_action_space
         self.observation_space = self.single_observation_space
@@ -112,7 +123,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._mass = params['mass']
         self._inertia = torch.tensor(params['inertia_diag'], device=self.device)
         self._inertia_inv = 1.0 / self._inertia
-        self._gravity = torch.tensor([0.0, 0.0, -9.81], device=self.device)
+        self._gravity = torch.tensor([0.0, 0.0, -1], device=self.device)
 
         # Episode tracking
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -222,6 +233,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._completed_episode_lengths[reset_envs] = self.episode_length_buf[reset_envs].float()
             self._completed_episode_rewards[reset_envs] = self._cumulative_rewards[reset_envs]
             self._reset_idx(reset_envs)
+
+        # Render if human mode is enabled
+        if self.render_mode == "human" and HAS_RERUN:
+            self._render()
 
         # Compute reward statistics across all environments
         info = {
@@ -399,6 +414,26 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._velocity[env_ids] = 0.0
         self._quaternion[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
         self._angular_velocity[env_ids] = 0.0
+
+    def _render(self):
+        """Render the environment using rerun logging."""
+        if not HAS_RERUN:
+            return
+
+        # Log the first environment's state (index 0)
+        position = self._position[0].detach().cpu().numpy()
+        quaternion = self._quaternion[0].detach().cpu().numpy()
+        quat_xyzw = np.array([quaternion[1], quaternion[2],
+                              quaternion[3], quaternion[0]])
+
+
+
+        for i, action_val in enumerate(self._actions[0].cpu().numpy()):
+            rr.log(f"actions/motor_{i}", rr.Scalars(float(action_val)))
+
+        for i, observation_val in enumerate(self.observations[0].cpu().numpy()):
+            rr.log(f"observations/{i}", rr.Scalars(float(observation_val)))
+        log_drone_pose(position, quat_xyzw)
 
     def close(self):
         pass

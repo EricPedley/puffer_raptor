@@ -128,7 +128,7 @@ def main(args_cli):
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
 
     # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{args_cli.ml_framework}"
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_torch"
     print(f"Exact experiment name requested from command line: {log_dir}")
 
     if agent_cfg["agent"]["experiment"]["experiment_name"]:
@@ -151,6 +151,7 @@ def main(args_cli):
     env = QuadcopterEnv(
         num_envs=num_envs,
         device=device,
+        render_mode='human'
     )
     skrl_env = PufferEnvSKRLWrapper(env)
 
@@ -176,13 +177,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
     parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-    parser.add_argument(
-        "--ml_framework",
-        type=str,
-        default="torch",
-        choices=["torch"],
-        help="The ML framework used for training the skrl agent.",
-    )
     parser.add_argument(
         "--device",
         type=str,
