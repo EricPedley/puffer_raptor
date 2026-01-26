@@ -239,7 +239,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         angular_acc = self._inertia_inv * (torque_body - gyroscopic)
 
         # Update angular velocity
-        self._angular_velocity = torch.clamp(self._angular_velocity + angular_acc * self.dt, -1e20, 1e20)
+        self._angular_velocity = torch.clamp(self._angular_velocity + angular_acc * self.dt, -1e12, 1e12)
         # idk why angular velocity gets this high but when it does, it crashes training because it causes NaNs down the line. The clamp fixes this.
 
         # Update quaternion
@@ -275,6 +275,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             gravity_body,            # 3
             rel_pos_body,            # 3
         ], dim=-1)
+
+        assert not torch.isnan(obs).any()
+        assert not torch.isinf(obs).any()
 
 
         return obs
