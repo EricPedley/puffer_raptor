@@ -66,7 +66,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        max_episode_length: int = 500,
+        max_episode_length: int = 1000,
         dt: float = 0.01,
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
@@ -295,17 +295,19 @@ class QuadcopterEnv(pufferlib.PufferEnv):
     def _get_observations(self) -> np.ndarray:
         """Compute observations for all environments."""
         # Get rotation matrix
-        R = quaternion_to_rotation_matrix(self._quaternion)
+        # R = quaternion_to_rotation_matrix(self._quaternion)
 
         # Transform velocity to body frame
-        velocity_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), self._velocity)
+        qc = quaternion_conjugate(self._quaternion)
+
+        velocity_body = rotate_vector_by_quaternion(self._velocity, qc)
 
         # Project gravity to body frame
-        gravity_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), self._gravity.unsqueeze(0).expand(self.num_envs, -1))
+        gravity_body = rotate_vector_by_quaternion(self._gravity.unsqueeze(0).expand(self.num_envs, -1), qc)
 
         # Transform desired position to body frame (relative position)
         rel_pos_world = self._desired_pos_w - self._position
-        rel_pos_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), rel_pos_world)
+        rel_pos_body = rotate_vector_by_quaternion(rel_pos_world, qc)
 
         obs = torch.cat([
             velocity_body,           # 3
@@ -328,8 +330,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             individual reward components for each environment.
         """
         # Get velocity in body frame for reward calculation
-        R = quaternion_to_rotation_matrix(self._quaternion)
-        velocity_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), self._velocity)
+        # R = quaternion_to_rotation_matrix(self._quaternion)
+        # velocity_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), self._velocity)
+        velocity_body = rotate_vector_by_quaternion(self._velocity, quaternion_conjugate(self._quaternion))
 
         lin_vel = torch.sum(torch.square(velocity_body), dim=1)
         ang_vel = torch.sum(torch.square(self._angular_velocity), dim=1)
@@ -426,14 +429,25 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         quat_xyzw = np.array([quaternion[1], quaternion[2],
                               quaternion[3], quaternion[0]])
 
-
-
         for i, action_val in enumerate(self._actions[0].cpu().numpy()):
             rr.log(f"actions/motor_{i}", rr.Scalars(float(action_val)))
 
         for i, observation_val in enumerate(self.observations[0].cpu().numpy()):
             rr.log(f"observations/{i}", rr.Scalars(float(observation_val)))
+
         log_drone_pose(position, quat_xyzw)
+
+        # Log goal position with 0.5m axis (identity quaternion: [x, y, z, w])
+        goal_position = self._desired_pos_w[0].detach().cpu().numpy()
+        rr.log(
+            "goal",
+            rr.Transform3D(
+                translation=goal_position,
+                quaternion=[0, 0, 0, 1],  # Identity quaternion [x, y, z, w]
+            ),
+            rr.TransformAxes3D(0.5),
+            static=False,
+        )
 
     def close(self):
         pass
