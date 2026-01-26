@@ -1,0 +1,12 @@
+[project]
+name = "puffer-raptor"
+version = "0.1.0"
+description = "Quadcopter RL training with PufferLib"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pufferlib>=3.0.0",
+    "gymnasium>=0.29.0",
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+]
