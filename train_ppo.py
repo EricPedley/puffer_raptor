@@ -73,10 +73,7 @@ def train(args):
     )
 
     # Create vectorized environment (PufferLib creates multiple env copies)
-    vecenv = pufferlib.vector.make(
-        QuadcopterEnv,
-        # num_envs=args.num_envs,  # Create this many environment copies
-    )
+    vecenv = QuadcopterEnv(num_envs=args.num_envs)
 
     # Create policy
     policy = Policy(vecenv.driver_env, hidden_size=args.hidden_size).to(args.device)
@@ -94,6 +91,7 @@ def train(args):
     config = pufferl.load_config('default')
     config['train']['env'] = "l2f drone"
     config['train']['batch_size'] = 8192
+    config['train']['bptt_horizon'] = 'auto'
 
     # Create trainer
     trainer = pufferl.PuffeRL(config['train'], vecenv, policy)
