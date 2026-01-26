@@ -37,10 +37,25 @@ def quaternion_conjugate(q: torch.Tensor) -> torch.Tensor:
 
 
 def rotate_vector_by_quaternion(v: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-    """Rotate a vector by a quaternion (w, x, y, z format)."""
+    """
+    Rotate a vector by a quaternion (w, x, y, z format).
+    v is in body frame and q is the transform from body to world frame.
+    The result is v in world frame.
+    """
     q_v = torch.cat([torch.zeros_like(v[..., :1]), v], dim=-1)
     q_conj = quaternion_conjugate(q)
     rotated = quaternion_multiply(quaternion_multiply(q, q_v), q_conj)
+    return rotated[..., 1:]
+
+def rotate_vector_by_quaternion_conj(v: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """
+    Rotate a vector by a quaternion (w, x, y, z format).
+    v is in world frame and q is the transform from body to world frame.
+    The result is v in body frame.
+    """
+    q_v = torch.cat([torch.zeros_like(v[..., :1]), v], dim=-1)
+    q_conj = quaternion_conjugate(q)
+    rotated = quaternion_multiply(quaternion_multiply(q_conj, q_v), q)
     return rotated[..., 1:]
 
 
@@ -123,7 +138,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._mass = params['mass']
         self._inertia = torch.tensor(params['inertia_diag'], device=self.device)
         self._inertia_inv = 1.0 / self._inertia
-        self._gravity = torch.tensor([0.0, 0.0, -1], device=self.device)
+        self._gravity = torch.tensor([0.0, 0.0, -9.81], device=self.device)
+        self._gravity_unit = torch.tensor([0.0, 0.0, -1.0], device=self.device)
 
         # Episode tracking
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -200,7 +216,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         )
         # Roll and pitch moment (torque in x and y axis)
         cross_prod = sum([
-            torch.cross(self._rotor_positions[:, i, :], rotor_thrust[:, i, :], dim=-1)
+            torch.cross(self._rotor_positions[:, i, :], rotor_thrust[:, i, :])#, dim=-1)
             for i in range(4)
         ])
         torque_body += cross_prod
@@ -276,6 +292,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         gyroscopic = torch.cross(self._angular_velocity, I_omega, dim=-1)
         angular_acc = self._inertia_inv * (torque_body - gyroscopic)
 
+        # rl_tools::utils::vector_operations::matrix_vector_product<DEVICE, T, 3, 3>(params.dynamics.J, state.angular_velocity, vector);
+        # // flops: 6
+        # rl_tools::utils::vector_operations::cross_product<DEVICE, T>(state.angular_velocity, vector, vector2);
+        # rl_tools::utils::vector_operations::sub<DEVICE, T, 3>(torque, vector2, vector);
+        # // flops: 9
+        # rl_tools::utils::vector_operations::matrix_vector_product<DEVICE, T, 3, 3>(params.dynamics.J_inv, vector, state_change.angular_velocity);
+
         # Update angular velocity
         self._angular_velocity = torch.clamp(self._angular_velocity + angular_acc * self.dt, -1e12, 1e12)
         # idk why angular velocity gets this high but when it does, it crashes training because it causes NaNs down the line. The clamp fixes this.
@@ -298,16 +321,15 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # R = quaternion_to_rotation_matrix(self._quaternion)
 
         # Transform velocity to body frame
-        qc = quaternion_conjugate(self._quaternion)
 
-        velocity_body = rotate_vector_by_quaternion(self._velocity, qc)
+        velocity_body = rotate_vector_by_quaternion_conj(self._velocity, self._quaternion)
 
         # Project gravity to body frame
-        gravity_body = rotate_vector_by_quaternion(self._gravity.unsqueeze(0).expand(self.num_envs, -1), qc)
+        gravity_body = rotate_vector_by_quaternion_conj(self._gravity_unit.unsqueeze(0).expand(self.num_envs, -1), self._quaternion)
 
         # Transform desired position to body frame (relative position)
         rel_pos_world = self._desired_pos_w - self._position
-        rel_pos_body = rotate_vector_by_quaternion(rel_pos_world, qc)
+        rel_pos_body = rotate_vector_by_quaternion_conj(rel_pos_world, self._quaternion)
 
         obs = torch.cat([
             velocity_body,           # 3
@@ -332,7 +354,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Get velocity in body frame for reward calculation
         # R = quaternion_to_rotation_matrix(self._quaternion)
         # velocity_body = torch.einsum('bij,bj->bi', R.transpose(-2, -1), self._velocity)
-        velocity_body = rotate_vector_by_quaternion(self._velocity, quaternion_conjugate(self._quaternion))
+        velocity_body = rotate_vector_by_quaternion_conj(self._velocity, self._quaternion)
 
         lin_vel = torch.sum(torch.square(velocity_body), dim=1)
         ang_vel = torch.sum(torch.square(self._angular_velocity), dim=1)
