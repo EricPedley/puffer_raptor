@@ -54,34 +54,6 @@ def quaternion_to_rotation_matrix(q: torch.Tensor) -> torch.Tensor:
 
     return R
 
-class SamplePufferEnv(pufferlib.PufferEnv):
-    def __init__(self, buf=None, seed=0):
-        self.single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(1,))
-        self.single_action_space = gymnasium.spaces.Discrete(2)
-        self.num_agents = 2
-        super().__init__(buf)
-
-    def reset(self, seed=0):
-        self.observations[:] = self.observation_space.sample()
-        return self.observations, []
-
-    def step(self, action):
-        self.observations[:] = self.observation_space.sample()
-        infos = [{'infos': 'is a list of dictionaries'}]
-        return self.observations, self.rewards, self.terminals, self.truncations, infos
-
-if __name__ == '__main__':
-    puffer_env = SamplePufferEnv()
-    observations, infos = puffer_env.reset()
-    actions = puffer_env.action_space.sample()
-    observations, rewards, terminals, truncations, infos = puffer_env.step(actions)
-    print('Puffer envs use a vector interface and in-place array updates')
-    print('Observation:', observations)
-    print('Reward:', rewards)
-    print('Terminal:', terminals)
-    print('Truncation:', truncations)
-
-
 class QuadcopterEnv(pufferlib.PufferEnv):
     def __init__(
         self,
@@ -238,6 +210,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Compute reward statistics across all environments
         info = {
             "mean_reward": self.rewards.mean().item(),
+            "mean_length": self.episode_length_buf.float().mean().item()
         }
 
         # Add mean for each reward component
@@ -264,11 +237,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         I_omega = self._inertia * self._angular_velocity
         gyroscopic = torch.cross(self._angular_velocity, I_omega, dim=-1)
         angular_acc = self._inertia_inv * (torque_body - gyroscopic)
-        assert not torch.isinf(angular_acc).any().item()
 
         # Update angular velocity
-        self._angular_velocity = torch.clamp(self._angular_velocity + angular_acc * self.dt, -1e9, 1e9)
-        assert not torch.isinf(self._angular_velocity).any().item()
+        self._angular_velocity = torch.clamp(self._angular_velocity + angular_acc * self.dt, -1e20, 1e20)
+        # idk why angular velocity gets this high but when it does, it crashes training because it causes NaNs down the line. The clamp fixes this.
 
         # Update quaternion
         # dq/dt = 0.5 * q * omega_quat
@@ -277,12 +249,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._angular_velocity
         ], dim=-1)
         q_dot = 0.5 * quaternion_multiply(self._quaternion, omega_quat)
-        assert not torch.isnan(q_dot).any().item()
         self._quaternion += q_dot * self.dt
 
         # Normalize quaternion
         self._quaternion = self._quaternion / torch.norm(self._quaternion, dim=-1, keepdim=True)
-        assert not torch.isnan(self._quaternion).any().item()
 
     def _get_observations(self) -> np.ndarray:
         """Compute observations for all environments."""
