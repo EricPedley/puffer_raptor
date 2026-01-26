@@ -11,20 +11,6 @@ from drone_env import QuadcopterEnv
 from skrl.utils.runner.torch import Runner
 from skrl_train import PufferEnvSKRLWrapper
 
-
-def find_latest_checkpoint(exp_name: str = "quadcopter_ppo") -> str:
-    """Find the latest checkpoint file for the given experiment name."""
-    checkpoint_pattern = f"{exp_name}*.pt"
-    checkpoints = glob.glob(checkpoint_pattern)
-
-    if not checkpoints:
-        raise FileNotFoundError(f"No checkpoints found matching pattern: {checkpoint_pattern}")
-
-    # Sort by modification time and return the latest
-    latest = max(checkpoints, key=os.path.getmtime)
-    return latest
-
-
 def load_config(config_path: str) -> dict:
     """Load YAML configuration file."""
     with open(config_path, 'r') as f:
@@ -85,9 +71,9 @@ def run_rollout(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run rollout with rendering using latest skrl checkpoint")
+    parser = argparse.ArgumentParser(description="Run rollout with rendering using skrl checkpoint")
 
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint (auto-find latest if not specified)")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--max-steps", type=int, default=500, help="Max steps per episode")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -102,10 +88,7 @@ def main():
     torch.manual_seed(args.seed)
 
     # Find checkpoint
-    if args.checkpoint is None:
-        checkpoint_path = find_latest_checkpoint()
-    else:
-        checkpoint_path = args.checkpoint
+    checkpoint_path = args.checkpoint
 
     print(f"Loading checkpoint from: {checkpoint_path}")
 

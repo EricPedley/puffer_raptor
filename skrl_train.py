@@ -36,6 +36,10 @@ class PufferEnvSKRLWrapper(Wrapper):
         super().__init__(env)
         self.env=env
 
+    @property
+    def num_agents(self):
+        return 1
+
     def reset(self) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
@@ -57,7 +61,8 @@ class PufferEnvSKRLWrapper(Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of torch.Tensor and any other info
         """
-        return self.env.step(actions)
+        obs, reward, terminated, truncated, info = self.env.step(actions)
+        return obs, reward.reshape(-1, 1), terminated.reshape(-1, 1), truncated.reshape(-1, 1), info
 
     def state(self) -> torch.Tensor:
         """Get the environment state
@@ -147,11 +152,10 @@ def main(args_cli):
     resume_path = args_cli.checkpoint if args_cli.checkpoint else None
 
     # create pufferlib environment
-    num_envs = args_cli.num_envs if args_cli.num_envs is not None else 1
+    num_envs = 4096
     env = QuadcopterEnv(
         num_envs=num_envs,
         device=device,
-        render_mode='human'
     )
     skrl_env = PufferEnvSKRLWrapper(env)
 

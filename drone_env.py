@@ -91,7 +91,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         render_mode: Optional[str] = None,
         **kwargs
     ):
-        self.single_action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+        self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32) # should be (-1, 1) but in isaaclab it's inf so we're sticking with that
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
         )
