@@ -146,7 +146,7 @@ def main():
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.05, help="Linear velocity reward scale")
     parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.01, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.05, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.00, help="Dynamics randomization range")
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
