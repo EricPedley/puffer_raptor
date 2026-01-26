@@ -63,7 +63,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         dt: float = 0.01,
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
-        distance_to_goal_reward_scale: float = 1.0,
+        distance_to_goal_reward_scale: float = 15.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
@@ -143,6 +143,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._rotor_positions = self._nominal_rotor_positions.unsqueeze(0).repeat(self.num_envs, 1, 1)
         self._rising_delay_constants = self._nominal_rising_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
         self._falling_delay_constants = self._nominal_falling_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
+        self._decimation_steps = 2
 
     def step(self, actions: torch.Tensor) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Execute one step in the environment."""
@@ -157,7 +158,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Process actions and apply physics
         self._actions = actions.clone().clamp(-1.0, 1.0)
         actions_0_1 = (self._actions + 1.0) / 2.0
-
+        for _ in range(self._decimation_steps-1):
+            self._step_once(actions_0_1)
+        return self._step_once(actions_0_1)
+    
+    def _step_once(self, actions_0_1: torch.Tensor):
         # Apply motor delay
         rising_mask = actions_0_1 > self._rotor_speeds
         falling_mask = actions_0_1 <= self._rotor_speeds
