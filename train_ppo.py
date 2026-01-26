@@ -139,17 +139,17 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=4096*2, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=4096, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="my_quad_parameters.json", help="Path to quadcopter config")
-    parser.add_argument("--max-episode-length", type=int, default=10_000, help="Maximum episode length")
+    parser.add_argument("--max-episode-length", type=int, default=1000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.05, help="Linear velocity reward scale")
     parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.01, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=1.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.2, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.0, help="Dynamics randomization range")
 
     # Training parameters
-    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size")
+    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=10_000_000, help="Total training timesteps")
 
     # Logging and checkpointing
