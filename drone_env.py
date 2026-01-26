@@ -122,9 +122,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         }
         self._cumulative_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
-        # Completed episode statistics (updated when episodes end)
-        self._completed_episode_lengths: list[int] = []
-        self._completed_episode_rewards: list[float] = []
+        # Completed episode statistics (stores most recent completed episode for each env)
+        self._completed_episode_lengths = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._completed_episode_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # Store nominal (original) dynamics parameters
         self._nominal_thrust_coefficients = torch.tensor(params['thrust_coefficients'], device=self.device, dtype=torch.float32)
@@ -214,9 +214,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         reset_envs = torch.where(self.terminals | self.truncations)[0]
         if len(reset_envs) > 0:
             # Store completed episode stats before resetting
-            for env_idx in reset_envs:
-                self._completed_episode_lengths.append(self.episode_length_buf[env_idx].item())
-                self._completed_episode_rewards.append(self._cumulative_rewards[env_idx].item())
+            self._completed_episode_lengths[reset_envs] = self.episode_length_buf[reset_envs].float()
+            self._completed_episode_rewards[reset_envs] = self._cumulative_rewards[reset_envs]
             self._reset_idx(reset_envs)
 
         # Compute reward statistics across all environments
@@ -228,18 +227,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         for key, value in rewards_dict.items():
             info[f"mean_{key}"] = value.mean().item()
 
-        # Add completed episode statistics if any episodes finished
-        if self._completed_episode_lengths:
-            info["episode_length_min"] = min(self._completed_episode_lengths)
-            info["episode_length_max"] = max(self._completed_episode_lengths)
-            info["episode_length_mean"] = sum(self._completed_episode_lengths) / len(self._completed_episode_lengths)
-            info["episode_reward_min"] = min(self._completed_episode_rewards)
-            info["episode_reward_max"] = max(self._completed_episode_rewards)
-            info["episode_reward_mean"] = sum(self._completed_episode_rewards) / len(self._completed_episode_rewards)
-            info["episodes_completed"] = len(self._completed_episode_lengths)
-            # Clear the lists after reporting
-            self._completed_episode_lengths.clear()
-            self._completed_episode_rewards.clear()
+        # Add episode statistics (min/max/mean across most recent completed episode per env)
+        info["episode_length_min"] = self._completed_episode_lengths.min().item()
+        info["episode_length_max"] = self._completed_episode_lengths.max().item()
+        info["episode_length_mean"] = self._completed_episode_lengths.mean().item()
+        info["episode_reward_min"] = self._completed_episode_rewards.min().item()
+        info["episode_reward_max"] = self._completed_episode_rewards.max().item()
+        info["episode_reward_mean"] = self._completed_episode_rewards.mean().item()
 
         self.infos = [info]
         return (self.observations, self.rewards, self.terminals,
