@@ -96,7 +96,7 @@ def main():
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint (auto-find latest if not specified)")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
-    parser.add_argument("--max-steps", type=int, default=500, help="Max steps per episode")
+    parser.add_argument("--max-steps", type=int, default=2000, help="Max steps per episode")
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size of policy")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device")

@@ -59,6 +59,66 @@ def rotate_vector_by_quaternion_conj(v: torch.Tensor, q: torch.Tensor) -> torch.
     return rotated[..., 1:]
 
 
+def quaternion_error_axis_angle(q_current: torch.Tensor, q_desired: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the axis-angle error between current and desired quaternions.
+    Returns the axis-angle representation (3D vector where magnitude is angle).
+    Result is in the body frame of q_current.
+
+    q_current, q_desired: quaternions in (w, x, y, z) format
+    """
+    # q_error = q_desired * q_current^-1 gives rotation from current to desired
+    # But we want it in body frame, so: q_error = q_current^-1 * q_desired
+    q_current_inv = quaternion_conjugate(q_current)
+    q_error = quaternion_multiply(q_current_inv, q_desired)
+
+    # Ensure we take the shortest path (q and -q represent same rotation)
+    # If w < 0, negate the quaternion
+    sign = torch.sign(q_error[..., 0:1])
+    sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+    q_error = q_error * sign
+
+    # Extract axis-angle from quaternion
+    # q = [cos(theta/2), sin(theta/2) * axis]
+    w = q_error[..., 0:1]
+    xyz = q_error[..., 1:]
+
+    # sin(theta/2) = ||xyz||
+    sin_half_angle = torch.norm(xyz, dim=-1, keepdim=True)
+
+    # Handle small angles to avoid division by zero
+    # For small angles: theta ≈ 2 * sin(theta/2), axis ≈ xyz / sin(theta/2)
+    # So axis_angle ≈ 2 * xyz
+    small_angle_mask = sin_half_angle < 1e-6
+
+    # For larger angles: theta = 2 * atan2(sin(theta/2), cos(theta/2))
+    half_angle = torch.atan2(sin_half_angle, w)
+    angle = 2.0 * half_angle
+
+    # axis = xyz / sin(theta/2), axis_angle = angle * axis
+    axis_angle = torch.where(
+        small_angle_mask,
+        2.0 * xyz,  # Small angle approximation
+        angle * xyz / (sin_half_angle + 1e-10)  # Normal case
+    )
+
+    return axis_angle
+
+
+def quaternion_from_z_rotation(yaw: torch.Tensor) -> torch.Tensor:
+    """
+    Create quaternion from yaw angle (rotation about z-axis).
+    yaw: tensor of yaw angles in radians
+    Returns: quaternion in (w, x, y, z) format
+    """
+    half_yaw = yaw / 2.0
+    w = torch.cos(half_yaw)
+    x = torch.zeros_like(yaw)
+    y = torch.zeros_like(yaw)
+    z = torch.sin(half_yaw)
+    return torch.stack([w, x, y, z], dim=-1)
+
+
 def quaternion_to_rotation_matrix(q: torch.Tensor) -> torch.Tensor:
     """Convert quaternion to rotation matrix (w, x, y, z format)."""
     w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
@@ -86,14 +146,17 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
         distance_to_goal_reward_scale: float = 15.0,
+        orientation_reward_scale: float = 5.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
         **kwargs
     ):
         self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32) # should be (-1, 1) but in isaaclab it's inf so we're sticking with that
+        # Observations: velocity_body (3) + angular_velocity (3) + gravity_body (3) +
+        #               rel_pos_body (3) + orientation_error_axis_angle (3) + rpm_scaled (4) = 19
         self.single_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(16,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32
         )
         self.num_envs = num_envs
         self.num_agents = num_envs  # For PufferLib compatibility
@@ -106,6 +169,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.lin_vel_reward_scale = lin_vel_reward_scale
         self.ang_vel_reward_scale = ang_vel_reward_scale
         self.distance_to_goal_reward_scale = distance_to_goal_reward_scale
+        self.orientation_reward_scale = orientation_reward_scale
         self.dynamics_randomization_delta = dynamics_randomization_delta
         self.render_mode = render_mode
 
@@ -134,6 +198,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # Goal orientation (quaternion, z-axis rotations only)
+        self._desired_quat_w = torch.zeros(self.num_envs, 4, device=self.device)
+        self._desired_quat_w[:, 0] = 1.0  # identity quaternion
+
         # Physics parameters
         self._mass = params['mass']
         self._inertia = torch.tensor(params['inertia_diag'], device=self.device)
@@ -147,7 +215,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in ["lin_vel", "ang_vel", "distance_to_goal"]
+            for key in ["lin_vel", "ang_vel", "distance_to_goal", "orientation"]
         }
         self._cumulative_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
@@ -337,12 +405,16 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         rpm_scaled = self._rotor_speeds / self._max_rpm
 
+        # Compute orientation error as axis-angle (in body frame)
+        orientation_error = quaternion_error_axis_angle(self._quaternion, self._desired_quat_w)
+
         obs = torch.cat([
             velocity_body,           # 3
             self._angular_velocity,  # 3
             gravity_body,            # 3
             rel_pos_body,            # 3
-            rpm_scaled
+            orientation_error,       # 3
+            rpm_scaled               # 4
         ], dim=-1)
 
         assert not torch.isnan(obs).any()
@@ -368,12 +440,24 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._position, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
+        # Orientation error reward (using axis-angle magnitude)
+        orientation_error = quaternion_error_axis_angle(self._quaternion, self._desired_quat_w)
+        orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
+        orientation_reward_mapped = 1 - torch.tanh(orientation_error_magnitude / 0.5)
+
         rewards = {
+            "lin_vel": lin_vel * self.dt,
+            "ang_vel": ang_vel * self.dt,
+            "distance_to_goal": distance_to_goal_mapped * self.dt,
+            "orientation": orientation_reward_mapped * self.dt, # scale orientation reward by distance to goal
+        }
+        scaled_rewards = {
             "lin_vel": lin_vel * self.lin_vel_reward_scale * self.dt,
             "ang_vel": ang_vel * self.ang_vel_reward_scale * self.dt,
             "distance_to_goal": distance_to_goal_mapped * self.distance_to_goal_reward_scale * self.dt,
+            "orientation": orientation_reward_mapped * self.orientation_reward_scale * self.dt, # scale orientation reward by distance to goal
         }
-        reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+        reward = torch.sum(torch.stack(list(scaled_rewards.values())), dim=0)
 
         # Logging
         for key, value in rewards.items():
@@ -441,6 +525,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
 
+        # Sample new goal orientations (z-axis rotations only)
+        yaw_angles = torch.zeros(len(env_ids), device=self.device).uniform_(-np.pi, np.pi)
+        self._desired_quat_w[env_ids] = quaternion_from_z_rotation(yaw_angles)
+
         # Reset quadcopter state to origin with identity orientation
         self._position[env_ids] = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self._velocity[env_ids] = 0.0
@@ -466,13 +554,16 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         log_drone_pose(position, quat_xyzw)
 
-        # Log goal position with 0.5m axis (identity quaternion: [x, y, z, w])
+        # Log goal position with goal orientation
         goal_position = self._desired_pos_w[0].detach().cpu().numpy()
+        goal_quaternion = self._desired_quat_w[0].detach().cpu().numpy()
+        goal_quat_xyzw = np.array([goal_quaternion[1], goal_quaternion[2],
+                                   goal_quaternion[3], goal_quaternion[0]])
         rr.log(
             "goal",
             rr.Transform3D(
                 translation=goal_position,
-                quaternion=[0, 0, 0, 1],  # Identity quaternion [x, y, z, w]
+                quaternion=goal_quat_xyzw,
             ),
             rr.TransformAxes3D(0.5),
             static=False,

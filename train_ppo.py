@@ -92,7 +92,8 @@ def train(args):
     # Sampling and batch parameters (matching SKRL config)
     # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
-    train_config['batch_size'] = args.num_envs * 32  # SKRL rollouts=32
+    rollouts_multiplier = 32
+    train_config['batch_size'] = args.num_envs * rollouts_multiplier  # SKRL rollouts=rollouts_multiplier
     train_config['bptt_horizon'] = 'auto'
 
     # SKRL: learning_epochs=8
@@ -100,7 +101,7 @@ def train(args):
 
     # SKRL: mini_batches=8, so minibatch_size = batch_size / 8
     # With num_envs=4096, batch=131072, minibatch=16384
-    train_config['minibatch_size'] = (args.num_envs * 32) // 8
+    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier) // 8
 
     # PPO hyperparameters (matching SKRL config)
     train_config['gamma'] = 0.99              # SKRL: discount_factor
@@ -112,7 +113,7 @@ def train(args):
     train_config['max_grad_norm'] = 1.0       # SKRL: grad_norm_clip
 
     # Optimizer (SKRL uses Adam with lr=5e-4)
-    train_config['optimizer'] = 'adam'
+    train_config['optimizer'] = 'muon'
     train_config['learning_rate'] = 5.0e-04   # SKRL: learning_rate
     train_config['anneal_lr'] = True          # SKRL uses KLAdaptiveLR, we use cosine
 
@@ -161,10 +162,10 @@ def main():
     # Environment parameters
     parser.add_argument("--num-envs", type=int, default=4096, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="my_quad_parameters.json", help="Path to quadcopter config")
-    parser.add_argument("--max-episode-length", type=int, default=500, help="Maximum episode length")
+    parser.add_argument("--max-episode-length", type=int, default=1000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.05, help="Linear velocity reward scale")
-    parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.01, help="Angular velocity reward scale")
+    parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.05, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
     parser.add_argument("--dynamics-randomization-delta", type=float, default=0.00, help="Dynamics randomization range")
 
