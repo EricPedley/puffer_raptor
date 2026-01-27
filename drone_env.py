@@ -93,7 +93,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
     ):
         self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32) # should be (-1, 1) but in isaaclab it's inf so we're sticking with that
         self.single_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(16,), dtype=np.float32
         )
         self.num_envs = num_envs
         self.num_agents = num_envs  # For PufferLib compatibility
@@ -141,6 +141,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._gravity = torch.tensor([0.0, 0.0, -9.81], device=self.device)
         self._gravity_unit = torch.tensor([0.0, 0.0, -1.0], device=self.device)
 
+        self._max_rpm = params['max_measured_rpm']
+
         # Episode tracking
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_sums = {
@@ -155,6 +157,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Store nominal (original) dynamics parameters
         self._nominal_thrust_coefficients = torch.tensor(params['thrust_coefficients'], device=self.device, dtype=torch.float32)
+        self._nominal_thrust_coefficients[:, 1] /= self._max_rpm
+        self._nominal_thrust_coefficients[:, 2] /= self._max_rpm**2
         self._nominal_thrust_directions = torch.tensor(params['rotor_thrust_directions'], dtype=torch.float32, device=self.device)
         self._nominal_rotor_torque_directions = torch.tensor(params['rotor_torque_directions'], dtype=torch.float32, device=self.device)
         self._nominal_rotor_torque_constants = torch.tensor(params['rotor_torque_constants'], dtype=torch.float32, device=self.device)
@@ -184,7 +188,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Process actions and apply physics
         self._actions = actions.clone().clamp(-1.0, 1.0)
-        actions_0_1 = (self._actions + 1.0) / 2.0
+        actions_0_1 = self._max_rpm * (self._actions + 1.0) / 2.0
         for _ in range(self._decimation_steps-1):
             self._step_once(actions_0_1)
         return self._step_once(actions_0_1)
@@ -331,11 +335,14 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rel_pos_world = self._desired_pos_w - self._position
         rel_pos_body = rotate_vector_by_quaternion_conj(rel_pos_world, self._quaternion)
 
+        rpm_scaled = self._rotor_speeds / self._max_rpm
+
         obs = torch.cat([
             velocity_body,           # 3
             self._angular_velocity,  # 3
             gravity_body,            # 3
             rel_pos_body,            # 3
+            rpm_scaled
         ], dim=-1)
 
         assert not torch.isnan(obs).any()
