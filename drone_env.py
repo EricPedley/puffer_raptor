@@ -194,6 +194,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Actions and forces
         self._actions = torch.zeros(self.num_envs, 4, device=self.device)
         self._rotor_speeds = torch.zeros(self.num_envs, 4, device=self.device)
+        self._total_thrust_body = torch.zeros(self.num_envs, 3, device=self.device)
 
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -225,8 +226,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Store nominal (original) dynamics parameters
         self._nominal_thrust_coefficients = torch.tensor(params['thrust_coefficients'], device=self.device, dtype=torch.float32)
-        self._nominal_thrust_coefficients[:, 1] /= self._max_rpm
-        self._nominal_thrust_coefficients[:, 2] /= self._max_rpm**2
         self._nominal_thrust_directions = torch.tensor(params['rotor_thrust_directions'], dtype=torch.float32, device=self.device)
         self._nominal_rotor_torque_directions = torch.tensor(params['rotor_torque_directions'], dtype=torch.float32, device=self.device)
         self._nominal_rotor_torque_constants = torch.tensor(params['rotor_torque_constants'], dtype=torch.float32, device=self.device)
@@ -294,10 +293,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         torque_body += cross_prod
 
         # Total thrust in body frame
-        total_thrust_body = rotor_thrust.sum(dim=1)
+        self._total_thrust_body = rotor_thrust.sum(dim=1)
 
         # Integrate physics
-        self._integrate_physics(total_thrust_body, torque_body)
+        self._integrate_physics(self._total_thrust_body, torque_body)
 
         # Get observations
         self.observations = self._get_observations()
@@ -553,6 +552,32 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             rr.log(f"observations/{i}", rr.Scalars(float(observation_val)))
 
         log_drone_pose(position, quat_xyzw)
+
+        # Log angular velocity in degrees/s as time series
+        angular_vel_rad = self._angular_velocity[0].detach().cpu().numpy()
+        angular_vel_deg = np.degrees(angular_vel_rad)
+        rr.log("angular_velocity_deg_s/roll", rr.Scalars(float(angular_vel_deg[0])))
+        rr.log("angular_velocity_deg_s/pitch", rr.Scalars(float(angular_vel_deg[1])))
+        rr.log("angular_velocity_deg_s/yaw", rr.Scalars(float(angular_vel_deg[2])))
+
+        # Log RPMs as time series
+        rpms = self._rotor_speeds[0].detach().cpu().numpy()
+        rr.log("rotor_speeds_rpm/motor_0", rr.Scalars(float(rpms[0])))
+        rr.log("rotor_speeds_rpm/motor_1", rr.Scalars(float(rpms[1])))
+        rr.log("rotor_speeds_rpm/motor_2", rr.Scalars(float(rpms[2])))
+        rr.log("rotor_speeds_rpm/motor_3", rr.Scalars(float(rpms[3])))
+
+        # Log total thrust in body frame as time series
+        total_thrust = self._total_thrust_body[0].detach().cpu().numpy()
+        rr.log("total_thrust_body_N/x", rr.Scalars(float(total_thrust[0])))
+        rr.log("total_thrust_body_N/y", rr.Scalars(float(total_thrust[1])))
+        rr.log("total_thrust_body_N/z", rr.Scalars(float(total_thrust[2])))
+
+        # Log velocity in world frame as time series
+        velocity_world = self._velocity[0].detach().cpu().numpy()
+        rr.log("velocity_world_m_s/x", rr.Scalars(float(velocity_world[0])))
+        rr.log("velocity_world_m_s/y", rr.Scalars(float(velocity_world[1])))
+        rr.log("velocity_world_m_s/z", rr.Scalars(float(velocity_world[2])))
 
         # Log goal position with goal orientation
         goal_position = self._desired_pos_w[0].detach().cpu().numpy()
