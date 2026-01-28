@@ -10,6 +10,7 @@ from pufferlib.pufferl import WandbLogger
 from pufferlib.emulation import GymnasiumPufferEnv
 from drone_env import QuadcopterEnv
 from export import export_weights
+from time import time
 
 class Policy(torch.nn.Module):
     """Simple MLP policy for continuous control."""
@@ -125,35 +126,29 @@ def train(args):
     })
     trainer = pufferl.PuffeRL(train_config, vecenv, policy, logger)
 
-    # Training loop
-    while trainer.global_step < args.total_timesteps:
-        trainer.evaluate()
-        logs = trainer.train()
+    start_time = time()
+    # Training loop (5 minutes wall clock)
+    try:
+        while time() - start_time < 5*60:
+            trainer.evaluate()
+            logs = trainer.train()
 
-        if trainer.global_step % args.print_interval == 0:
-            print(f"Step: {trainer.global_step}/{args.total_timesteps}")
-            if logs:
-                print(f"  Logs: {logs}")
+            if trainer.global_step % args.print_interval == 0:
+                print(f"Step: {trainer.global_step}/{args.total_timesteps}")
+                if logs:
+                    print(f"  Logs: {logs}")
+    finally:
+        # Save final model
+        final_path = f"{args.exp_name}_final.pt"
+        torch.save({
+            'policy_state_dict': policy.state_dict(),
+            'global_step': trainer.global_step,
+        }, final_path)
+        export_weights(policy, 'neural_network.c')
+        print(f"Training complete! Saved final model to {final_path}")
 
-        if args.checkpoint_interval > 0 and trainer.global_step % args.checkpoint_interval == 0:
-            checkpoint_path = f"{args.exp_name}_step_{trainer.global_step}.pt"
-            torch.save({
-                'policy_state_dict': policy.state_dict(),
-                'global_step': trainer.global_step,
-            }, checkpoint_path)
-            print(f"Saved checkpoint to {checkpoint_path}")
-
-    # Save final model
-    final_path = f"{args.exp_name}_final.pt"
-    torch.save({
-        'policy_state_dict': policy.state_dict(),
-        'global_step': trainer.global_step,
-    }, final_path)
-    export_weights(policy, 'neural_network.c')
-    print(f"Training complete! Saved final model to {final_path}")
-
-    trainer.print_dashboard()
-    trainer.close()
+        trainer.print_dashboard()
+        trainer.close()
 
 
 def main():
@@ -167,7 +162,7 @@ def main():
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.05, help="Linear velocity reward scale")
     parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.05, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.00, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.05, help="Dynamics randomization range")
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
