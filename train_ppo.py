@@ -45,14 +45,6 @@ class Policy(torch.nn.Module):
         return self.forward_eval(observations, state)
 
 
-def make_env_creator(**env_kwargs):
-    """Create an environment creator function for PufferLib."""
-    def env_creator(buf=None, seed=None):
-        # Each environment instance simulates ONE quadcopter
-        env = QuadcopterEnv(num_envs=1, **env_kwargs)
-        return GymnasiumPufferEnv(env=env, buf=buf, seed=seed)
-    return env_creator
-
 
 def train(args):
     """Train a PPO agent using PufferLib."""
@@ -73,6 +65,7 @@ def train(args):
         distance_to_goal_reward_scale=args.distance_to_goal_reward_scale,
         dynamics_randomization_delta=args.dynamics_randomization_delta,
         device=args.device,
+        use_compile=True
     )
 
     # Create policy
