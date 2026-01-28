@@ -146,7 +146,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
         distance_to_goal_reward_scale: float = 15.0,
-        orientation_reward_scale: float = 5.0,
+        orientation_reward_scale: float = 10.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
