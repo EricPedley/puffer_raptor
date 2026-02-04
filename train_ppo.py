@@ -95,7 +95,7 @@ def train(args):
 
     # SKRL: mini_batches=8, so minibatch_size = batch_size / 8
     # With num_envs=4096, batch=131072, minibatch=16384
-    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier) // 8
+    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
 
     # PPO hyperparameters (matching SKRL config)
     train_config['gamma'] = 0.99              # SKRL: discount_factor
@@ -120,9 +120,9 @@ def train(args):
     trainer = pufferl.PuffeRL(train_config, vecenv, policy, logger)
 
     start_time = time()
-    # Training loop (5 minutes wall clock)
+    # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 5*60:
+        while time() - start_time < 2*60:
             trainer.evaluate()
             logs = trainer.train()
 
@@ -148,14 +148,14 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=4096, help="Number of parallel environments")
-    parser.add_argument("--config-path", type=str, default="my_quad_parameters.json", help="Path to quadcopter config")
+    parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments")
+    parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
     parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.05, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.2, help="Dynamics randomization range")
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
