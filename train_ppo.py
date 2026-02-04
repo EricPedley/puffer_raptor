@@ -148,7 +148,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=2048, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
