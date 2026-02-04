@@ -1,6 +1,6 @@
 # Puffer Raptor - Quadcopter RL Training
 
-A standalone quadcopter reinforcement learning environment with PufferLib PPO training, independent of Isaac Lab.
+A standalone quadcopter reinforcement learning environment with PufferLib PPO training, independent of Isaac Lab. The repo name comes from the paper that provided the inspiration for this project and the dynamics model: https://raptor.rl.tools/
 
 ## Overview
 
