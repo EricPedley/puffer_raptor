@@ -1,6 +1,7 @@
+from datetime import datetime
 from torch import nn
 
-def export_weights(policy, filepath: str):
+def export_weights(policy, filepath: str, wandb_url: str = None, run_id: str = None):
     net = policy.net
 
     i = 0
@@ -10,6 +11,14 @@ def export_weights(policy, filepath: str):
     layers = [layer for layer in net if isinstance(layer, nn.Linear)]+[policy.action_mean]
     float_to_str = lambda x: str(float(x))
     with open(filepath, "w+") as file:
+        file.write("/*\n")
+        file.write(f" * Neural Network Weights\n")
+        file.write(f" * Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        if run_id:
+            file.write(f" * Run ID: {run_id}\n")
+        if wandb_url:
+            file.write(f" * Wandb: {wandb_url}\n")
+        file.write(" */\n\n")
         file.write("#include \"neural_network.h\"\n")
         file.write("#include \"nn_helpers.h\"\n\n")
         for i, layer in enumerate(layers):
