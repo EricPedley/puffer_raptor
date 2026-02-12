@@ -2,9 +2,12 @@
 """Train a PPO agent on the quadcopter environment using PufferLib."""
 
 import argparse
+import ast
+import configparser
 import json
 import os
 import shutil
+from collections import defaultdict
 from datetime import datetime
 from time import time
 
@@ -14,6 +17,41 @@ from pufferlib import pufferl
 from pufferlib.pufferl import WandbLogger
 from drone_env import QuadcopterEnv
 from export import export_weights
+
+
+def load_pufferlib_config():
+    """Load PufferLib's default.ini config without argparse (avoids sys.argv conflicts)."""
+    puffer_dir = os.path.dirname(os.path.realpath(pufferlib.__file__))
+    default_ini = os.path.join(puffer_dir, 'config', 'default.ini')
+
+    p = configparser.ConfigParser()
+    p.read(default_ini)
+
+    config = defaultdict(dict)
+    for section in p.sections():
+        for key in p[section]:
+            try:
+                value = ast.literal_eval(p[section][key])
+            except:
+                value = p[section][key]
+
+            # Build nested dict from dotted section names
+            parts = section.split('.')
+            d = config
+            for part in parts:
+                d = d.setdefault(part, {})
+            d[key] = value
+
+    # Flatten top-level sections (base keys go to root)
+    result = defaultdict(dict)
+    for key, value in config.items():
+        if isinstance(value, dict):
+            result[key] = value
+        else:
+            result[key] = value
+
+    result['train']['use_rnn'] = False
+    return result
 
 class Policy(torch.nn.Module):
     """Simple MLP policy for continuous control."""
@@ -49,8 +87,8 @@ class Policy(torch.nn.Module):
 
 
 
-def train(args):
-    """Train a PPO agent using PufferLib."""
+def train(args, wandb_group=None):
+    """Train a PPO agent using PufferLib. Returns mean episode reward."""
 
     # Set random seeds
     torch.manual_seed(args.seed)
@@ -74,13 +112,20 @@ def train(args):
     # Create policy
     policy = Policy(vecenv.driver_env, hidden_size=args.hidden_size).to(args.device)
 
+    # Load checkpoint if provided
+    if args.checkpoint:
+        checkpoint_path = os.path.abspath(args.checkpoint)
+        print(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=args.device)
+        policy.load_state_dict(checkpoint['policy_state_dict'])
+
     print(f"Training PPO agent on {args.num_envs} parallel environments")
     print(f"Observation space: {vecenv.single_observation_space.shape}")
     print(f"Action space: {vecenv.single_action_space.shape}")
     print(f"Total timesteps: {args.total_timesteps}")
 
     # Load base config and override with command-line arguments
-    config = pufferl.load_config('default')
+    config = load_pufferlib_config()
     train_config = config['train']
 
     train_config['env'] = "l2f drone"
@@ -114,7 +159,7 @@ def train(args):
     if args.wandb:
         logger = WandbLogger({
             'wandb_project': args.wandb_project,
-            'wandb_group': 'sim2sim',
+            'wandb_group': wandb_group or 'sim2sim',
             'tag': 'my_tag',
             **vars(args),
         })
@@ -144,6 +189,8 @@ def train(args):
         artifact.add_file(args.config_path)
         logger.wandb.run.log_artifact(artifact)
         logger.wandb.config.update({'local_log_dir': os.path.abspath(log_dir)})
+        if args.checkpoint:
+            logger.wandb.config.update({'checkpoint': os.path.abspath(args.checkpoint)})
 
     print(f"Log directory: {log_dir}")
 
@@ -151,11 +198,15 @@ def train(args):
     trainer = pufferl.PuffeRL(train_config, vecenv, policy, logger)
 
     start_time = time()
+    mean_reward = 0.0
     # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 2*60:
+        while time() - start_time < 5*60:
             trainer.evaluate()
             logs = trainer.train()
+
+            if logs and 'environment/episode_reward_mean' in logs:
+                mean_reward = logs['environment/episode_reward_mean']
 
             if trainer.global_step % args.print_interval == 0:
                 print(f"Step: {trainer.global_step}/{args.total_timesteps}")
@@ -175,16 +226,27 @@ def train(args):
             run_id=run_id,
         )
         print(f"Training complete! Saved artifacts to {log_dir}")
+        print(f"Final mean episode reward: {mean_reward}")
 
         trainer.print_dashboard()
         trainer.close()
+
+    return mean_reward
 
 
 def run_sweep(args):
     """Run hyperparameter sweep using PufferLib's built-in sweep system."""
     import pufferlib.sweep
 
-    config = pufferl.load_config('default')
+    # Sweeps require wandb for aggregate viewing
+    args.wandb = True
+
+    # Unique group name so all runs in this sweep are grouped together
+    sweep_group = f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    print(f"Sweep group: {sweep_group}")
+    print(f"View aggregate results in wandb by filtering group = {sweep_group}")
+
+    config = load_pufferlib_config()
     sweep_config = config.pop('sweep', {})
     method = sweep_config.pop('method', 'Protein')
 
@@ -213,11 +275,10 @@ def run_sweep(args):
                 setattr(args, key.replace('-', '_'), env_config[key])
 
         start = time()
-        train(args)
+        score = train(args, wandb_group=sweep_group)
         duration = time() - start
 
-        # TODO: extract actual episode return from trainer logs
-        score = 0
+        print(f"Run {i+1} score: {score:.2f}, duration: {duration:.0f}s")
         sweep.observe(config, score, duration)
 
 
@@ -253,9 +314,10 @@ def main():
     parser.add_argument("--wandb-project", type=str, default="puffer-raptor", help="W&B project name")
     parser.add_argument("--print-interval", type=int, default=10000, help="Print stats interval")
     parser.add_argument("--checkpoint-interval", type=int, default=100000, help="Checkpoint save interval (0 to disable)")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint .pt file to resume from")
 
     # Sweep
-    parser.add_argument("--sweep", action="store_true", help="Run hyperparameter sweep")
+    parser.add_argument("--run-sweep", action="store_true", help="Run hyperparameter sweep")
     parser.add_argument("--max-sweep-runs", type=int, default=50, help="Number of sweep runs")
 
     # Other
@@ -264,7 +326,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.sweep:
+    if args.run_sweep:
         run_sweep(args)
     else:
         train(args)
