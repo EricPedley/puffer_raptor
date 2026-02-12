@@ -2,15 +2,18 @@
 """Train a PPO agent on the quadcopter environment using PufferLib."""
 
 import argparse
+import json
+import os
+import shutil
+from datetime import datetime
+from time import time
+
 import torch
 import pufferlib
-import pufferlib.vector
 from pufferlib import pufferl
 from pufferlib.pufferl import WandbLogger
-from pufferlib.emulation import GymnasiumPufferEnv
 from drone_env import QuadcopterEnv
 from export import export_weights
-from time import time
 
 class Policy(torch.nn.Module):
     """Simple MLP policy for continuous control."""
@@ -80,43 +83,71 @@ def train(args):
     config = pufferl.load_config('default')
     train_config = config['train']
 
-
     train_config['env'] = "l2f drone"
 
     # Sampling and batch parameters (matching SKRL config)
     # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
     rollouts_multiplier = 32
-    train_config['batch_size'] = args.num_envs * rollouts_multiplier  # SKRL rollouts=rollouts_multiplier
+    train_config['batch_size'] = args.num_envs * rollouts_multiplier
     train_config['bptt_horizon'] = 'auto'
-
-    # SKRL: learning_epochs=8
-    train_config['update_epochs'] = 8
-
-    # SKRL: mini_batches=8, so minibatch_size = batch_size / 8
-    # With num_envs=4096, batch=131072, minibatch=16384
     train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
 
-    # PPO hyperparameters (matching SKRL config)
-    train_config['gamma'] = 0.99              # SKRL: discount_factor
-    train_config['gae_lambda'] = 0.95         # SKRL: lambda
-    train_config['clip_coef'] = 0.2           # SKRL: ratio_clip
-    train_config['vf_clip_coef'] = 0.2        # SKRL: value_clip
-    train_config['vf_coef'] = 2.0             # SKRL: value_loss_scale
-    train_config['ent_coef'] = 0.0            # SKRL: entropy_loss_scale
-    train_config['max_grad_norm'] = 1.0       # SKRL: grad_norm_clip
+    # PPO hyperparameters from CLI args
+    train_config['update_epochs'] = args.update_epochs
+    train_config['gamma'] = args.gamma
+    train_config['gae_lambda'] = args.gae_lambda
+    train_config['clip_coef'] = args.clip_coef
+    train_config['vf_clip_coef'] = 0.2
+    train_config['vf_coef'] = args.vf_coef
+    train_config['ent_coef'] = args.ent_coef
+    train_config['max_grad_norm'] = 1.0
 
-    # Optimizer (SKRL uses Adam with lr=5e-4)
+    # Optimizer
     train_config['optimizer'] = 'muon'
-    train_config['learning_rate'] = 5.0e-04   # SKRL: learning_rate
-    train_config['anneal_lr'] = True          # SKRL uses KLAdaptiveLR, we use cosine
+    train_config['learning_rate'] = args.learning_rate
+    train_config['anneal_lr'] = True
+
+    # Initialize wandb early to get run ID for log directory
+    logger = None
+    wandb_url = None
+    if args.wandb:
+        logger = WandbLogger({
+            'wandb_project': args.wandb_project,
+            'wandb_group': 'sim2sim',
+            'tag': 'my_tag',
+            **vars(args),
+        })
+        run_id = logger.run_id
+        wandb_url = logger.wandb.run.get_url()
+    else:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Create per-run log directory
+    log_dir = os.path.join("logs", run_id)
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Copy flight params and save config snapshot
+    shutil.copy(args.config_path, os.path.join(log_dir, "flight_params.json"))
+    with open(os.path.join(log_dir, "config.json"), 'w') as f:
+        json.dump({
+            "args": vars(args),
+            "train_config": dict(train_config),
+            "run_id": run_id,
+            "wandb_url": wandb_url,
+            "timestamp": datetime.now().isoformat(),
+        }, f, indent=2)
+
+    # Upload flight params and local path to wandb
+    if args.wandb:
+        artifact = logger.wandb.Artifact(f'flight_params_{run_id}', type='config')
+        artifact.add_file(args.config_path)
+        logger.wandb.run.log_artifact(artifact)
+        logger.wandb.config.update({'local_log_dir': os.path.abspath(log_dir)})
+
+    print(f"Log directory: {log_dir}")
 
     # Create trainer
-    logger = WandbLogger({
-        'wandb_project': 'puffer_raptor',
-        'wandb_group': 'sim2sim',
-        'tag': 'my_tag'
-    })
     trainer = pufferl.PuffeRL(train_config, vecenv, policy, logger)
 
     start_time = time()
@@ -131,17 +162,63 @@ def train(args):
                 if logs:
                     print(f"  Logs: {logs}")
     finally:
-        # Save final model
-        final_path = f"{args.exp_name}_final.pt"
+        # Save all artifacts to log directory
+        final_path = os.path.join(log_dir, "model.pt")
         torch.save({
             'policy_state_dict': policy.state_dict(),
             'global_step': trainer.global_step,
         }, final_path)
-        export_weights(policy, 'neural_network.c')
-        print(f"Training complete! Saved final model to {final_path}")
+        export_weights(
+            policy,
+            os.path.join(log_dir, "neural_network.c"),
+            wandb_url=wandb_url,
+            run_id=run_id,
+        )
+        print(f"Training complete! Saved artifacts to {log_dir}")
 
         trainer.print_dashboard()
         trainer.close()
+
+
+def run_sweep(args):
+    """Run hyperparameter sweep using PufferLib's built-in sweep system."""
+    import pufferlib.sweep
+
+    config = pufferl.load_config('default')
+    sweep_config = config.pop('sweep', {})
+    method = sweep_config.pop('method', 'Protein')
+
+    sweep_cls = getattr(pufferlib.sweep, method)
+    sweep = sweep_cls(sweep_config)
+
+    sweep_keys = [
+        'learning_rate', 'gamma', 'gae_lambda', 'clip_coef',
+        'vf_coef', 'ent_coef', 'update_epochs',
+    ]
+
+    for i in range(args.max_sweep_runs):
+        print(f"\n=== Sweep Run {i+1}/{args.max_sweep_runs} ===")
+
+        sweep.suggest(config)
+
+        # Override args with suggested train parameters
+        for key in sweep_keys:
+            if key in config['train']:
+                setattr(args, key.replace('-', '_'), config['train'][key])
+
+        # Override env parameters if suggested
+        env_config = config.get('env', {})
+        for key in ['distance_to_goal_reward_scale', 'dynamics_randomization_delta']:
+            if key in env_config:
+                setattr(args, key.replace('-', '_'), env_config[key])
+
+        start = time()
+        train(args)
+        duration = time() - start
+
+        # TODO: extract actual episode return from trainer logs
+        score = 0
+        sweep.observe(config, score, duration)
 
 
 def main():
@@ -161,6 +238,15 @@ def main():
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
 
+    # PPO hyperparameters
+    parser.add_argument("--learning-rate", type=float, default=5.0e-04, help="Learning rate")
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
+    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
+    parser.add_argument("--clip-coef", type=float, default=0.2, help="PPO clip coefficient")
+    parser.add_argument("--vf-coef", type=float, default=2.0, help="Value function loss coefficient")
+    parser.add_argument("--ent-coef", type=float, default=0.0, help="Entropy loss coefficient")
+    parser.add_argument("--update-epochs", type=int, default=8, help="PPO update epochs per rollout")
+
     # Logging and checkpointing
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases logging")
@@ -168,13 +254,20 @@ def main():
     parser.add_argument("--print-interval", type=int, default=10000, help="Print stats interval")
     parser.add_argument("--checkpoint-interval", type=int, default=100000, help="Checkpoint save interval (0 to disable)")
 
+    # Sweep
+    parser.add_argument("--sweep", action="store_true", help="Run hyperparameter sweep")
+    parser.add_argument("--max-sweep-runs", type=int, default=50, help="Number of sweep runs")
+
     # Other
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use")
 
     args = parser.parse_args()
 
-    train(args)
+    if args.sweep:
+        run_sweep(args)
+    else:
+        train(args)
 
 
 if __name__ == "__main__":
