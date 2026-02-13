@@ -141,8 +141,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        max_episode_length: int = 1000,
-        dt: float = 0.01,
+        max_episode_length_seconds: float = 5,
+        sim_dt: float = 0.001,
+        decimation_steps: int = 10,
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
         distance_to_goal_reward_scale: float = 15.0,
@@ -150,15 +151,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         goal_position_threshold: float = 0.2,
         goal_orientation_threshold: float = 0.3,
         goal_velocity_threshold: float = 0.5,
-        step_penalty: float = -1.0,
-        termination_penalty: float = -5000.0,
-        goal_reward: float = 5000.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
         use_compile: bool = False,
         compile_mode: str = "reduce-overhead",
-        **kwargs
     ):
         self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32) # should be (-1, 1) but in isaaclab it's inf so we're sticking with that
         # Observations: velocity_body (3) + angular_velocity (3) + gravity_body (3) +
@@ -171,9 +168,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         super().__init__()
 
         self.device = torch.device(device)
-        self.dt = dt
-        self.max_episode_length = max_episode_length
-        self.max_episode_length_s = max_episode_length * dt
+        self.dt = sim_dt
+        self.max_episode_length = int(max_episode_length_seconds / (sim_dt * decimation_steps))
         self.lin_vel_reward_scale = lin_vel_reward_scale
         self.ang_vel_reward_scale = ang_vel_reward_scale
         self.distance_to_goal_reward_scale = distance_to_goal_reward_scale
@@ -181,9 +177,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.goal_position_threshold = goal_position_threshold
         self.goal_orientation_threshold = goal_orientation_threshold
         self.goal_velocity_threshold = goal_velocity_threshold
-        self.step_penalty = step_penalty
-        self.termination_penalty = termination_penalty
-        self.goal_reward = goal_reward
         self.dynamics_randomization_delta = dynamics_randomization_delta
         self.render_mode = render_mode
 
@@ -255,7 +248,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._rotor_positions = self._nominal_rotor_positions.unsqueeze(0).repeat(self.num_envs, 1, 1)
         self._rising_delay_constants = self._nominal_rising_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
         self._falling_delay_constants = self._nominal_falling_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
-        self._decimation_steps = 2
+        self._decimation_steps = decimation_steps
 
         # torch.compile setup
         self.use_compile = use_compile
@@ -295,7 +288,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._total_thrust_body,
             self.observations,
             self.rewards,
-            reward_components,
+            reward_components_for_logging,
             died,
             goal_reached,
         ) = self._compiled_physics_step(
@@ -333,10 +326,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Build rewards dict for logging (outside compiled region)
         rewards_dict = {
-            "lin_vel": reward_components[:, 0],
-            "ang_vel": reward_components[:, 1],
-            "distance_to_goal": reward_components[:, 2],
-            "orientation": reward_components[:, 3],
+            "lin_vel": reward_components_for_logging[:, 0],
+            "ang_vel": reward_components_for_logging[:, 1],
+            "distance_to_goal": reward_components_for_logging[:, 2],
+            "orientation": reward_components_for_logging[:, 3],
             "goal_reached": goal_reached.float(),
         }
 
@@ -349,11 +342,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Check for truncation (timeout)
         self.truncations = self.episode_length_buf >= self.max_episode_length - 1
-
-        # Apply terminal rewards: goal reached gets positive reward,
-        # died or timed out gets big negative penalty
-        # self.rewards[died] += self.termination_penalty
-        # self.rewards[goal_reached] += self.goal_reward
 
         # Accumulate rewards for episode tracking
         self._cumulative_rewards += self.rewards
@@ -512,11 +500,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
         orientation_reward_mapped = 1 - torch.tanh(orientation_error_magnitude / 0.5)
 
-        reward_components = torch.stack([
-            lin_vel * dt,
-            ang_vel * dt,
-            distance_to_goal_mapped * dt,
-            orientation_reward_mapped * dt,
+        reward_components_for_logging = torch.stack([
+            lin_vel,
+            ang_vel,
+            distance_to_goal_mapped,
+            orientation_reward_mapped,
         ], dim=-1)
 
         # Goal-reached detection
@@ -547,7 +535,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             total_thrust_body,
             observations,
             rewards,
-            reward_components,
+            reward_components_for_logging,
             died,
             goal_reached,
         )
