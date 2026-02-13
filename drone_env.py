@@ -152,7 +152,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         goal_velocity_threshold: float = 0.5,
         step_penalty: float = -1.0,
         termination_penalty: float = -5000.0,
-        goal_reward: float = 0.0,
+        goal_reward: float = 5000.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
@@ -284,7 +284,115 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Process actions and apply physics
         self._actions = actions.clone().clamp(-1.0, 1.0)
         actions_0_1 = self._max_rpm * (self._actions + 1.0) / 2.0
-        return self._step_once(actions_0_1)
+
+        # Call compiled physics kernel
+        (
+            self._rotor_speeds,
+            self._position,
+            self._velocity,
+            self._quaternion,
+            self._angular_velocity,
+            self._total_thrust_body,
+            self.observations,
+            self.rewards,
+            reward_components,
+            died,
+            goal_reached,
+        ) = self._compiled_physics_step(
+            actions_0_1,
+            self._rotor_speeds,
+            self._position,
+            self._velocity,
+            self._quaternion,
+            self._angular_velocity,
+            self._desired_pos_w,
+            self._desired_quat_w,
+            self._rotor_positions,
+            self._thrust_directions,
+            self._thrust_coefficients,
+            self._rotor_torque_constants,
+            self._rotor_torque_directions,
+            self._rising_delay_constants,
+            self._falling_delay_constants,
+            self._mass,
+            self._inertia,
+            self._inertia_inv,
+            self._gravity,
+            self._gravity_unit,
+            self.dt,
+            self._max_rpm,
+            self._decimation_steps,
+            self.lin_vel_reward_scale,
+            self.ang_vel_reward_scale,
+            self.distance_to_goal_reward_scale,
+            self.orientation_reward_scale,
+            self.goal_position_threshold,
+            self.goal_orientation_threshold,
+            self.goal_velocity_threshold,
+        )
+
+        # Build rewards dict for logging (outside compiled region)
+        rewards_dict = {
+            "lin_vel": reward_components[:, 0],
+            "ang_vel": reward_components[:, 1],
+            "distance_to_goal": reward_components[:, 2],
+            "orientation": reward_components[:, 3],
+            "goal_reached": goal_reached.float(),
+        }
+
+        # Update episode sums for logging
+        for key, value in rewards_dict.items():
+            self._episode_sums[key] += value
+
+        # Terminate on died or goal reached
+        self.terminals = died | goal_reached
+
+        # Check for truncation (timeout)
+        self.truncations = self.episode_length_buf >= self.max_episode_length - 1
+
+        # Apply terminal rewards: goal reached gets positive reward,
+        # died or timed out gets big negative penalty
+        # self.rewards[died] += self.termination_penalty
+        # self.rewards[goal_reached] += self.goal_reward
+
+        # Accumulate rewards for episode tracking
+        self._cumulative_rewards += self.rewards
+
+        # Update episode length
+        self.episode_length_buf += 1
+
+        # Handle resets
+        reset_envs = torch.where(self.terminals | self.truncations)[0]
+        if len(reset_envs) > 0:
+            # Store completed episode stats before resetting
+            self._completed_episode_lengths[reset_envs] = self.episode_length_buf[reset_envs].float()
+            self._completed_episode_rewards[reset_envs] = self._cumulative_rewards[reset_envs]
+            self._reset_idx(reset_envs)
+
+        # Render if human mode is enabled
+        if self.render_mode == "human" and HAS_RERUN:
+            self._render()
+
+        # Compute reward statistics across all environments
+        info = {
+            "mean_reward": self.rewards.mean().item(),
+        }
+
+        # Add mean for each reward component
+        for key, value in rewards_dict.items():
+            info[f"mean_{key}"] = value.mean().item()
+
+        # Add episode statistics (min/max/mean across most recent completed episode per env)
+        info["episode_length_min"] = self._completed_episode_lengths.min().item()
+        info["episode_length_max"] = self._completed_episode_lengths.max().item()
+        info["episode_length_mean"] = self._completed_episode_lengths.mean().item()
+        info["episode_reward_min"] = self._completed_episode_rewards.min().item()
+        info["episode_reward_max"] = self._completed_episode_rewards.max().item()
+        info["episode_reward_mean"] = self._completed_episode_rewards.mean().item()
+
+        self.infos = [info]
+        return (self.observations, self.rewards, self.terminals,
+            self.truncations, self.infos)
     
     def _physics_step_impl(
         self,
@@ -311,7 +419,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         dt: float,
         max_rpm: float,
         decimation_steps: int,
-        step_penalty: float,
+        lin_vel_reward_scale: float,
+        ang_vel_reward_scale: float,
+        distance_to_goal_reward_scale: float,
+        orientation_reward_scale: float,
         goal_position_threshold: float,
         goal_orientation_threshold: float,
         goal_velocity_threshold: float,
@@ -416,8 +527,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             (speed < goal_velocity_threshold)
         )
 
-        # Training reward: constant negative per step
-        rewards = torch.full_like(distance_to_goal, step_penalty)
+        # Dense reward for training
+        rewards = (
+            lin_vel * lin_vel_reward_scale * dt +
+            ang_vel * ang_vel_reward_scale * dt +
+            distance_to_goal_mapped * distance_to_goal_reward_scale * dt +
+            orientation_reward_mapped * orientation_reward_scale * dt
+        )
 
         # Check for termination (died)
         died = (position[:, 2] < 0.1) | (position[:, 2] > 2.0)
@@ -435,112 +551,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             died,
             goal_reached,
         )
-
-    def _step_once(self, actions_0_1: torch.Tensor):
-        # Call compiled physics kernel
-        (
-            self._rotor_speeds,
-            self._position,
-            self._velocity,
-            self._quaternion,
-            self._angular_velocity,
-            self._total_thrust_body,
-            self.observations,
-            self.rewards,
-            reward_components,
-            died,
-            goal_reached,
-        ) = self._compiled_physics_step(
-            actions_0_1,
-            self._rotor_speeds,
-            self._position,
-            self._velocity,
-            self._quaternion,
-            self._angular_velocity,
-            self._desired_pos_w,
-            self._desired_quat_w,
-            self._rotor_positions,
-            self._thrust_directions,
-            self._thrust_coefficients,
-            self._rotor_torque_constants,
-            self._rotor_torque_directions,
-            self._rising_delay_constants,
-            self._falling_delay_constants,
-            self._mass,
-            self._inertia,
-            self._inertia_inv,
-            self._gravity,
-            self._gravity_unit,
-            self.dt,
-            self._max_rpm,
-            self._decimation_steps,
-            self.step_penalty,
-            self.goal_position_threshold,
-            self.goal_orientation_threshold,
-            self.goal_velocity_threshold,
-        )
-
-        # Build rewards dict for logging (outside compiled region)
-        rewards_dict = {
-            "lin_vel": reward_components[:, 0],
-            "ang_vel": reward_components[:, 1],
-            "distance_to_goal": reward_components[:, 2],
-            "orientation": reward_components[:, 3],
-            "goal_reached": goal_reached.float(),
-        }
-
-        # Update episode sums for logging
-        for key, value in rewards_dict.items():
-            self._episode_sums[key] += value
-
-        # Terminate on died or goal reached
-        self.terminals = died | goal_reached
-
-        # Check for truncation (timeout)
-        self.truncations = self.episode_length_buf >= self.max_episode_length - 1
-
-        # Apply terminal rewards: goal reached gets positive reward,
-        # died or timed out gets big negative penalty
-        self.rewards[died] += self.termination_penalty
-
-        # Accumulate rewards for episode tracking
-        self._cumulative_rewards += self.rewards
-
-        # Update episode length
-        self.episode_length_buf += 1
-
-        # Handle resets
-        reset_envs = torch.where(self.terminals | self.truncations)[0]
-        if len(reset_envs) > 0:
-            # Store completed episode stats before resetting
-            self._completed_episode_lengths[reset_envs] = self.episode_length_buf[reset_envs].float()
-            self._completed_episode_rewards[reset_envs] = self._cumulative_rewards[reset_envs]
-            self._reset_idx(reset_envs)
-
-        # Render if human mode is enabled
-        if self.render_mode == "human" and HAS_RERUN:
-            self._render()
-
-        # Compute reward statistics across all environments
-        info = {
-            "mean_reward": self.rewards.mean().item(),
-        }
-
-        # Add mean for each reward component
-        for key, value in rewards_dict.items():
-            info[f"mean_{key}"] = value.mean().item()
-
-        # Add episode statistics (min/max/mean across most recent completed episode per env)
-        info["episode_length_min"] = self._completed_episode_lengths.min().item()
-        info["episode_length_max"] = self._completed_episode_lengths.max().item()
-        info["episode_length_mean"] = self._completed_episode_lengths.mean().item()
-        info["episode_reward_min"] = self._completed_episode_rewards.min().item()
-        info["episode_reward_max"] = self._completed_episode_rewards.max().item()
-        info["episode_reward_mean"] = self._completed_episode_rewards.mean().item()
-
-        self.infos = [info]
-        return (self.observations, self.rewards, self.terminals,
-            self.truncations, self.infos)
 
     def _get_observations(self) -> torch.Tensor:
         """Compute observations for all environments."""
