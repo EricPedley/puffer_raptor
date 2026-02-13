@@ -44,9 +44,6 @@ def run_rollout(
     device: str = "cuda",
 ):
     """Run a rollout with the given policy."""
-    if max_steps is None:
-        max_steps = env.max_episode_length
-
     policy.eval()
 
     total_reward = 0.0
@@ -58,7 +55,7 @@ def run_rollout(
     obs = torch.tensor(obs, dtype=torch.float32, device=device)
 
     with torch.no_grad():
-        for step in range(max_steps * num_episodes):
+        while True:
             # Get action from policy
             action_dist, value = policy.forward_eval(obs)
             actions = action_dist.mean  # Use deterministic actions (mean of distribution)
@@ -79,10 +76,6 @@ def run_rollout(
                 obs, _ = env.reset()
                 obs = torch.tensor(obs, dtype=torch.float32, device=device)
 
-            # Print progress
-            if (step + 1) % 100 == 0:
-                print(f"Step: {step + 1}")
-
     avg_reward = total_reward / max(1, episode_count)
     print(f"\nRollout complete!")
     print(f"Episodes: {episode_count}")
@@ -96,11 +89,10 @@ def main():
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint (auto-find latest if not specified)")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
-    parser.add_argument("--max-steps", type=int, default=2000, help="Max steps per episode")
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size of policy")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device")
-    parser.add_argument("--config-path", type=str, default="my_quad_parameters.json", help="Path to quadcopter config")
+    parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
 
     args = parser.parse_args()
@@ -123,7 +115,6 @@ def main():
     env = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
-        max_episode_length=args.max_steps,
         device=args.device,
         render_mode="human",  # Enable rendering
     )
@@ -140,7 +131,6 @@ def main():
         policy=policy,
         env=env,
         num_episodes=args.num_episodes,
-        max_steps=args.max_steps,
         device=args.device,
     )
 
