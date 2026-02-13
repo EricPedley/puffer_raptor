@@ -99,8 +99,6 @@ def train(args, wandb_group=None):
     vecenv = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
-        max_episode_length=args.max_episode_length,
-        dt=args.dt,
         lin_vel_reward_scale=args.lin_vel_reward_scale,
         ang_vel_reward_scale=args.ang_vel_reward_scale,
         distance_to_goal_reward_scale=args.distance_to_goal_reward_scale,
@@ -201,7 +199,7 @@ def train(args, wandb_group=None):
     mean_reward = 0.0
     # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 5*60:
+        while time() - start_time < 2*60:
             trainer.evaluate()
             logs = trainer.train()
 
@@ -293,7 +291,7 @@ def main():
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
     parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.2, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
