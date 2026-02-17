@@ -196,7 +196,7 @@ def train(args, wandb_group=None):
     mean_reward = 0.0
     # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 2*60:
+        while time() - start_time < 60:
             trainer.evaluate()
             logs = trainer.train()
 
