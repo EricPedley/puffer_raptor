@@ -223,7 +223,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in ["lin_vel", "ang_vel", "distance_to_goal", "orientation", "goal_reached"]
+            for key in ["dist_delta", "omega", "vel", "orientation_error", "goal_reached"]
         }
         self._cumulative_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
@@ -277,6 +277,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Process actions and apply physics
         self._actions = actions.clone().clamp(-1.0, 1.0)
         actions_0_1 = self._max_rpm * (self._actions + 1.0) / 2.0
+        prev_position = self._position.clone()
 
         # Call compiled physics kernel
         (
@@ -315,10 +316,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self.dt,
             self._max_rpm,
             self._decimation_steps,
-            self.lin_vel_reward_scale,
-            self.ang_vel_reward_scale,
-            self.distance_to_goal_reward_scale,
-            self.orientation_reward_scale,
+            prev_position,
             self.goal_position_threshold,
             self.goal_orientation_threshold,
             self.goal_velocity_threshold,
@@ -326,10 +324,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Build rewards dict for logging (outside compiled region)
         rewards_dict = {
-            "lin_vel": reward_components_for_logging[:, 0],
-            "ang_vel": reward_components_for_logging[:, 1],
-            "distance_to_goal": reward_components_for_logging[:, 2],
-            "orientation": reward_components_for_logging[:, 3],
+            "dist_delta": reward_components_for_logging[:, 0],
+            "omega": reward_components_for_logging[:, 1],
+            "vel": reward_components_for_logging[:, 2],
+            "orientation_error": reward_components_for_logging[:, 3],
             "goal_reached": goal_reached.float(),
         }
 
@@ -407,10 +405,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         dt: float,
         max_rpm: float,
         decimation_steps: int,
-        lin_vel_reward_scale: float,
-        ang_vel_reward_scale: float,
-        distance_to_goal_reward_scale: float,
-        orientation_reward_scale: float,
+        prev_position: torch.Tensor,
         goal_position_threshold: float,
         goal_orientation_threshold: float,
         goal_velocity_threshold: float,
@@ -492,40 +487,42 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             rpm_scaled               # 4
         ], dim=-1)
 
-        # Compute dense reward components for logging only
-        lin_vel = torch.sum(torch.square(velocity_body), dim=1)
-        ang_vel = torch.sum(torch.square(angular_velocity), dim=1)
+        # Compute reward components
         distance_to_goal = torch.linalg.norm(rel_pos_world, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
-        fine_grained_distance = 1 - torch.tanh(distance_to_goal / 0.1)
+        prev_dist = torch.linalg.norm(desired_pos_w - prev_position, dim=1)
+        dist_delta = prev_dist - distance_to_goal
+
+        vel_magnitude = torch.linalg.norm(velocity, dim=1)
+        omega_magnitude = torch.linalg.norm(angular_velocity, dim=1)
+
         orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
-        orientation_reward_mapped = 1 - torch.tanh(orientation_error_magnitude / 0.5)
+
+        # Shaping reward (matching C: alpha_dist * dist_delta - alpha_omega * omega - alpha_vel * vel)
+        alpha_dist = 1.0
+        alpha_omega = 0.01
+        alpha_vel = 0.01
+        rewards = alpha_dist * dist_delta - alpha_omega * omega_magnitude - alpha_vel * vel_magnitude
 
         reward_components_for_logging = torch.stack([
-            lin_vel,
-            ang_vel,
-            distance_to_goal_mapped,
-            orientation_reward_mapped,
+            dist_delta,
+            omega_magnitude,
+            vel_magnitude,
+            orientation_error_magnitude,
         ], dim=-1)
 
         # Goal-reached detection
-        speed = torch.linalg.norm(velocity, dim=1)
         goal_reached = (
             (distance_to_goal < goal_position_threshold) &
             (orientation_error_magnitude < goal_orientation_threshold) &
-            (speed < goal_velocity_threshold)
+            (vel_magnitude < goal_velocity_threshold)
         )
 
-        # Dense reward for training
-        rewards = (
-            lin_vel * lin_vel_reward_scale * dt +
-            ang_vel * ang_vel_reward_scale * dt +
-            (distance_to_goal_mapped + fine_grained_distance*10.0) * distance_to_goal_reward_scale * dt +
-            orientation_reward_mapped * orientation_reward_scale * dt
-        )
+        # Bonuses/penalties
+        rewards = rewards + goal_reached.float() * 1.0
 
-        # Check for termination (died)
+        # Check for termination (died / OOB)
         died = (position[:, 2] < 0.1) | (position[:, 2] > 2.0)
+        rewards = rewards - died.float() * 1.0
 
         return (
             rotor_speeds,
