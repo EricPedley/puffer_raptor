@@ -499,9 +499,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
 
         # Shaping reward (matching C: alpha_dist * dist_delta - alpha_omega * omega - alpha_vel * vel)
-        alpha_dist = 1.0
-        alpha_omega = 0.01
-        alpha_vel = 0.01
+        alpha_dist = 1.6
+        alpha_omega = 0.003
+        alpha_vel = 0.003
         rewards = alpha_dist * dist_delta - alpha_omega * omega_magnitude - alpha_vel * vel_magnitude
 
         reward_components_for_logging = torch.stack([
