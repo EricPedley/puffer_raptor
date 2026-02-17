@@ -141,13 +141,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        max_episode_length_seconds: float = 5,
+        max_episode_length_seconds: float = 40,
         sim_dt: float = 0.01,
         decimation_steps: int = 2,
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
         distance_to_goal_reward_scale: float = 15.0,
-        orientation_reward_scale: float = 10.0,
+        orientation_reward_scale: float = 15.0,
         goal_position_threshold: float = 0.2,
         goal_orientation_threshold: float = 0.3,
         goal_velocity_threshold: float = 0.5,
@@ -497,6 +497,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         ang_vel = torch.sum(torch.square(angular_velocity), dim=1)
         distance_to_goal = torch.linalg.norm(rel_pos_world, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        fine_grained_distance = 1 - torch.tanh(distance_to_goal / 0.1)
         orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
         orientation_reward_mapped = 1 - torch.tanh(orientation_error_magnitude / 0.5)
 
@@ -519,7 +520,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rewards = (
             lin_vel * lin_vel_reward_scale * dt +
             ang_vel * ang_vel_reward_scale * dt +
-            distance_to_goal_mapped * distance_to_goal_reward_scale * dt +
+            (distance_to_goal_mapped + fine_grained_distance*10.0) * distance_to_goal_reward_scale * dt +
             orientation_reward_mapped * orientation_reward_scale * dt
         )
 
