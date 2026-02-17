@@ -8,7 +8,7 @@ import torch
 from pathlib import Path
 
 from drone_env import QuadcopterEnv
-from train_ppo import Policy
+from train_ppo import Policy, load_config
 
 
 def find_latest_checkpoint(exp_name: str = "quadcopter_ppo") -> str:
@@ -54,10 +54,11 @@ def run_rollout(
     obs, _ = env.reset()
     obs = torch.tensor(obs, dtype=torch.float32, device=device)
 
+    state = {}
     with torch.no_grad():
         while True:
             # Get action from policy
-            action_dist, value = policy.forward_eval(obs)
+            action_dist, value = policy.forward_eval(obs, state)
             actions = action_dist.mean  # Use deterministic actions (mean of distribution)
 
             # Step environment
@@ -72,7 +73,8 @@ def run_rollout(
                 episode_count += 1
                 if episode_count >= num_episodes:
                     break
-                # Reset only the done environments
+                # Reset LSTM state and environments
+                state = {}
                 obs, _ = env.reset()
                 obs = torch.tensor(obs, dtype=torch.float32, device=device)
 
@@ -90,7 +92,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint (auto-find latest if not specified)")
     parser.add_argument("--latest", action="store_true", help="Use model.pt from the most recent logs/ subfolder")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
-    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size of policy")
+    parser.add_argument("--config-ini", type=str, default="drone.ini", help="Path to drone.ini config file")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
@@ -127,8 +129,14 @@ def main():
         render_mode="human",  # Enable rendering
     )
 
+    # Read policy sizes from ini
+    ini_config = load_config(args.config_ini)
+    policy_config = ini_config.get('policy', {})
+    hidden_size = policy_config.get('linear_size', 64)
+    rnn_hidden_size = policy_config.get('lstm_size', 16)
+
     # Create policy
-    policy = Policy(env, hidden_size=args.hidden_size).to(args.device)
+    policy = Policy(env, hidden_size=hidden_size, rnn_hidden_size=rnn_hidden_size).to(args.device)
 
     # Load checkpoint
     global_step = load_checkpoint(checkpoint_path, policy, args.device)
