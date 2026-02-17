@@ -99,9 +99,6 @@ def train(args, wandb_group=None):
     vecenv = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
-        lin_vel_reward_scale=args.lin_vel_reward_scale,
-        ang_vel_reward_scale=args.ang_vel_reward_scale,
-        distance_to_goal_reward_scale=args.distance_to_goal_reward_scale,
         dynamics_randomization_delta=args.dynamics_randomization_delta,
         device=args.device,
         use_compile=True
@@ -268,7 +265,7 @@ def run_sweep(args):
 
         # Override env parameters if suggested
         env_config = config.get('env', {})
-        for key in ['distance_to_goal_reward_scale', 'dynamics_randomization_delta']:
+        for key in ['dynamics_randomization_delta']:
             if key in env_config:
                 setattr(args, key.replace('-', '_'), env_config[key])
 
@@ -288,9 +285,6 @@ def main():
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
-    parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
-    parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
-    parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
     parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
 
     # Training parameters
