@@ -174,38 +174,33 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         decimation_steps: int = 1,
         # rl-tools Squared reward parameters (DEFAULT_PARAMETERS_FACTORY defaults)
         rwd_scale: float = 1.0,
-        rwd_constant: float = 0.5,
+        rwd_constant: float = 1.5,
         rwd_termination_penalty: float = -100.0,
         rwd_position: float = 1.0,
-        rwd_orientation: float = 0.1,
+        rwd_orientation: float = 0.2,
         rwd_linear_velocity: float = 0.0,
         rwd_angular_velocity: float = 0.0,
         rwd_action: float = 0.0,
         rwd_d_action: float = 1.0,
         rwd_non_negative: bool = False,
         # rl-tools termination thresholds
-        term_position: float = 1.0,
+        term_position: float = 2.0,
         term_linear_velocity: float = 2.0,
         term_angular_velocity: float = 35.0,
-        # rl-tools initial state randomization (init_90_deg defaults)
         init_guidance: float = 0.1,
-        init_max_position: float = 0.5,
+        init_max_position: float = 1.0,
         init_max_angle: float = np.pi / 2,
         init_max_linear_velocity: float = 1.0,
         init_max_angular_velocity: float = 1.0,
-        # Action history length for observation
-        action_history_length: int = 16,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
         use_compile: bool = False,
         compile_mode: str = "reduce-overhead",
     ):
-        self.action_history_length = action_history_length
         # Observations: position_error_world (3) + rotation_matrix (9) +
-        #               velocity_world (3) + angular_velocity (3) +
-        #               action_history (action_history_length * 4)
-        obs_dim = 3 + 9 + 3 + 3 + action_history_length * 4
+        #               velocity_world (3) + angular_velocity (3) + rpm_scaled (4) + last_action (4)
+        obs_dim = 3 + 9 + 3 + 3 + 4 + 4
         self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32)
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
@@ -268,17 +263,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._rotor_speeds = torch.zeros(self.num_envs, 4, device=self.device)
         self._total_thrust_body = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # Action history ring buffer (for observation, matches rl-tools StateRotorsHistory)
-        self._action_history = torch.zeros(self.num_envs, action_history_length, 4, device=self.device)
-        self._action_history_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-
-        # Goal position (desired state)
-        self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
-
-        # Goal orientation (quaternion, z-axis rotations only)
-        self._desired_quat_w = torch.zeros(self.num_envs, 4, device=self.device)
-        self._desired_quat_w[:, 0] = 1.0  # identity quaternion
-
         # Physics parameters
         self._mass = params['mass']
         self._inertia = torch.tensor(params['inertia_diag'], device=self.device)
@@ -291,7 +275,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in ["position_cost", "orientation_cost", "d_action_cost"]
+            for key in ["position_cost", "orientation_cost"]
         }
         self._cumulative_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
@@ -367,9 +351,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._velocity,
             self._quaternion,
             self._angular_velocity,
-            self._desired_pos_w,
-            self._action_history,
-            self._action_history_step,
             self._rotor_positions,
             self._thrust_directions,
             self._thrust_coefficients,
@@ -383,7 +364,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._gravity,
             self.dt,
             self._decimation_steps,
-            self.action_history_length,
+            self._max_rpm,
             self.rwd_scale,
             self.rwd_constant,
             self.rwd_termination_penalty,
@@ -399,11 +380,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self.term_angular_velocity,
         )
 
-        # Update action history ring buffer (outside compiled region for simplicity)
-        batch_idx = torch.arange(self.num_envs, device=self.device)
-        self._action_history[batch_idx, self._action_history_step] = self._actions
-        self._action_history_step = (self._action_history_step + 1) % self.action_history_length
-
         # Update last action for next step's d_action computation
         self._last_action = self._actions.clone()
 
@@ -411,7 +387,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rewards_dict = {
             "position_cost": reward_components_for_logging[:, 0],
             "orientation_cost": reward_components_for_logging[:, 1],
-            "d_action_cost": reward_components_for_logging[:, 2],
         }
 
         # Update episode sums for logging
@@ -473,9 +448,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         velocity: torch.Tensor,
         quaternion: torch.Tensor,
         angular_velocity: torch.Tensor,
-        desired_pos_w: torch.Tensor,
-        action_history: torch.Tensor,
-        action_history_step: torch.Tensor,
         rotor_positions: torch.Tensor,
         thrust_directions: torch.Tensor,
         thrust_coefficients: torch.Tensor,
@@ -489,7 +461,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         gravity: torch.Tensor,
         dt: float,
         decimation_steps: int,
-        action_history_length: int,
+        max_rpm: float,
         rwd_scale: float,
         rwd_constant: float,
         rwd_termination_penalty: float,
@@ -505,8 +477,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         term_angular_velocity: float,
     ):
         """Pure computation kernel - decimation loop + obs/reward in one compilable function."""
-        N = position.shape[0]
-
         # Run decimation_steps of physics integration
         for _ in range(decimation_steps):
             # Apply motor delay
@@ -567,7 +537,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # --- Observations (rl-tools DefaultActionHistoryObservation) ---
 
         # 1. TrajectoryTrackingPosition: position - desired_position (world frame, 3)
-        position_error = position - desired_pos_w
+        position_error = position
 
         # 2. OrientationRotationMatrix: flattened 3x3 rotation matrix (9)
         w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
@@ -584,22 +554,16 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # 4. AngularVelocity (3)
         # angular_velocity is already in body frame
 
-        # 5. ActionHistory: read from ring buffer, most recent first (action_history_length * 4)
-        # current_step points to where the NEXT action will be written
-        # Most recent action is at (current_step - 1) % H
-        H = action_history_length
-        step_offsets = torch.arange(H, device=position.device)  # (H,)
-        indices = (action_history_step.unsqueeze(1) - 1 - step_offsets.unsqueeze(0)) % H  # (N, H)
-        batch_idx = torch.arange(N, device=position.device).unsqueeze(1).expand(-1, H)  # (N, H)
-        action_history_obs = action_history[batch_idx, indices]  # (N, H, 4)
-        action_history_flat = action_history_obs.reshape(N, H * 4).clamp(-1.0, 1.0)
+        # 5. RPM scaled (4)
+        rpm_scaled = rotor_speeds / max_rpm
 
         observations = torch.cat([
             position_error,       # 3
             rot_matrix,           # 9
             velocity_error,       # 3
             angular_velocity,     # 3
-            action_history_flat,  # H * 4
+            rpm_scaled,           # 4
+            last_action
         ], dim=-1)
 
         # --- Reward (rl-tools Squared) ---
@@ -609,19 +573,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Orientation cost: 2 * acos(1 - |q_z|)
         # Matches rl-tools: components.orientation_cost = 2*acos(1-abs(state.orientation[3]))
-        orientation_cost = 2.0 * torch.acos(torch.clamp(1.0 - torch.abs(quaternion[:, 3]), -1.0, 1.0))
+        orientation_cost = torch.acos(1.0 - torch.abs(quaternion[:, 3]))
 
-        # Linear velocity cost: ||velocity||
-        linear_vel_cost = torch.linalg.norm(velocity, dim=1)
-
-        # Angular velocity cost: ||angular_velocity||
-        angular_vel_cost = torch.linalg.norm(angular_velocity, dim=1)
-
-        # Action cost: ||action_throttle_relative - hovering_throttle||^2
-        # hovering_throttle_relative is ~0.5 for most quads; using 0 since rwd_action default is 0
-        action_cost = torch.sum(torch.square(actions_clamped), dim=1)
-
-        # d_action cost: ||action - last_action||
+        # # d_action cost: ||action - last_action||
         d_action = actions_clamped - last_action
         d_action_cost = torch.linalg.norm(d_action, dim=1)
 
@@ -629,9 +583,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         weighted_cost = (
             rwd_position * position_cost +
             rwd_orientation * orientation_cost +
-            rwd_linear_velocity * linear_vel_cost +
-            rwd_angular_velocity * angular_vel_cost +
-            rwd_action * action_cost +
             rwd_d_action * d_action_cost
         )
 
@@ -654,14 +605,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Reward: -scale * weighted_cost + constant, with termination penalty
         scaled_weighted_cost = rwd_scale * weighted_cost
         rewards = -scaled_weighted_cost + rwd_constant
-        if rwd_non_negative:
-            rewards = torch.clamp(rewards, min=0.0)
         rewards = torch.where(died, torch.full_like(rewards, rwd_termination_penalty), rewards)
 
         reward_components_for_logging = torch.stack([
             position_cost,
             orientation_cost,
-            d_action_cost,
         ], dim=-1)
 
         return (
@@ -679,10 +627,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
     def _get_observations(self) -> torch.Tensor:
         """Compute observations for all environments (used at reset)."""
-        N = self.num_envs
-
         # 1. Position error (world frame)
-        position_error = self._position - self._desired_pos_w
+        position_error = self._position
 
         # 2. Rotation matrix (flattened)
         q = self._quaternion
@@ -699,20 +645,16 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # 4. Angular velocity
         angular_velocity = self._angular_velocity
 
-        # 5. Action history
-        H = self.action_history_length
-        step_offsets = torch.arange(H, device=self.device)
-        indices = (self._action_history_step.unsqueeze(1) - 1 - step_offsets.unsqueeze(0)) % H
-        batch_idx = torch.arange(N, device=self.device).unsqueeze(1).expand(-1, H)
-        action_history_obs = self._action_history[batch_idx, indices]
-        action_history_flat = action_history_obs.reshape(N, H * 4).clamp(-1.0, 1.0)
+        # 5. RPM scaled
+        rpm_scaled = self._rotor_speeds / self._max_rpm
 
         obs = torch.cat([
             position_error,       # 3
             rot_matrix,           # 9
             velocity_error,       # 3
             angular_velocity,     # 3
-            action_history_flat,  # H * 4
+            rpm_scaled,           # 4
+            self._last_action
         ], dim=-1)
 
         return obs
@@ -744,9 +686,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._rotor_speeds[env_ids] = 0.0
         self._cumulative_rewards[env_ids] = 0.0
 
-        # Reset action history
-        self._action_history[env_ids] = 0.0
-        self._action_history_step[env_ids] = 0
 
         # Reset episode sums
         for key in self._episode_sums.keys():
@@ -773,14 +712,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
                 1.0 + torch.zeros((num_reset, *self._nominal_falling_delay_constants.shape), device=self.device).uniform_(-delta, delta)
             )
 
-        # Sample new goal positions
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
-
-        # Sample new goal orientations (z-axis rotations only)
-        yaw_angles = torch.zeros(num_reset, device=self.device).uniform_(-np.pi, np.pi)
-        self._desired_quat_w[env_ids] = quaternion_from_z_rotation(yaw_angles)
-
         # rl-tools style initial state sampling (init_90_deg)
         # Guided vs random initialization
         guidance_mask = torch.zeros(num_reset, device=self.device).uniform_(0, 1) < self.init_guidance
@@ -789,8 +720,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         pos_offset = torch.zeros(num_reset, 3, device=self.device).uniform_(
             -self.init_max_position, self.init_max_position
         )
-        self._position[env_ids] = self._desired_pos_w[env_ids].clone()
-        self._position[env_ids] += torch.where(
+        self._position[env_ids] = torch.where(
             guidance_mask.unsqueeze(1).expand(-1, 3),
             torch.zeros_like(pos_offset),
             pos_offset,
@@ -874,10 +804,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rr.log("velocity_world_m_s/z", rr.Scalars(float(velocity_world[2])))
 
         # Log goal position with goal orientation
-        goal_position = self._desired_pos_w[0].detach().cpu().numpy()
-        goal_quaternion = self._desired_quat_w[0].detach().cpu().numpy()
-        goal_quat_xyzw = np.array([goal_quaternion[1], goal_quaternion[2],
-                                   goal_quaternion[3], goal_quaternion[0]])
+        goal_position = np.zeros(3)
+        goal_quat_xyzw = np.array([0,0,0,1])
         rr.log(
             "goal",
             rr.Transform3D(

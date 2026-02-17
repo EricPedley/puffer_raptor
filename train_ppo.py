@@ -196,7 +196,7 @@ def train(args, wandb_group=None):
     mean_reward = 0.0
     # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 60:
+        while time() - start_time < 2*60:
             trainer.evaluate()
             logs = trainer.train()
 
@@ -281,14 +281,14 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=2048, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=8192, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
     parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
 
     # Training parameters
-    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
+    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
 
     # PPO hyperparameters
