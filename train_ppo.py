@@ -50,20 +50,24 @@ def load_pufferlib_config():
         else:
             result[key] = value
 
-    result['train']['use_rnn'] = False
+    result['train']['use_rnn'] = True
     return result
 
 class Policy(torch.nn.Module):
-    """Simple MLP policy for continuous control."""
-    def __init__(self, env, hidden_size):
+    """LSTM policy for continuous control."""
+    def __init__(self, env, hidden_size, rnn_hidden_size=16):
         super().__init__()
         obs_shape = env.single_observation_space.shape[0]
         action_shape = env.single_action_space.shape[0]
+        self.hidden_size = rnn_hidden_size
 
-        self.net = torch.nn.Sequential(
+        self.encoder = torch.nn.Sequential(
             pufferlib.pytorch.layer_init(torch.nn.Linear(obs_shape, hidden_size)),
             torch.nn.ELU(),
-            pufferlib.pytorch.layer_init(torch.nn.Linear(hidden_size, hidden_size)),
+        )
+        self.lstm = torch.nn.LSTM(hidden_size, rnn_hidden_size, batch_first=True)
+        self.decoder = torch.nn.Sequential(
+            pufferlib.pytorch.layer_init(torch.nn.Linear(rnn_hidden_size, hidden_size)),
             torch.nn.ELU(),
         )
         self.action_mean = pufferlib.pytorch.layer_init(torch.nn.Linear(hidden_size, action_shape), std=0.01)
@@ -71,19 +75,45 @@ class Policy(torch.nn.Module):
         self.value_head = pufferlib.pytorch.layer_init(torch.nn.Linear(hidden_size, 1), std=1.0)
 
     def forward_eval(self, observations, state=None):
-        """Forward pass during evaluation (returns Normal distribution and values)."""
-        hidden = self.net(observations)
+        """Forward pass during evaluation."""
+        hidden = self.encoder(observations)
+        hidden = hidden.unsqueeze(1)  # (B, 1, H) for single-step LSTM
+
+        lstm_h = state.get('lstm_h') if state else None
+        lstm_c = state.get('lstm_c') if state else None
+        if lstm_h is not None:
+            lstm_h = lstm_h.unsqueeze(0)  # (1, B, rnn_H)
+            lstm_c = lstm_c.unsqueeze(0)
+            hidden, (lstm_h, lstm_c) = self.lstm(hidden, (lstm_h, lstm_c))
+        else:
+            hidden, (lstm_h, lstm_c) = self.lstm(hidden)
+
+        state['lstm_h'] = lstm_h.squeeze(0)
+        state['lstm_c'] = lstm_c.squeeze(0)
+
+        hidden = hidden.squeeze(1)  # (B, rnn_H)
+        hidden = self.decoder(hidden)
         action_mean = self.action_mean(hidden)
         action_logstd = self.action_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         values = self.value_head(hidden)
-        # Return Normal distribution for PufferLib's sample_logits
         action_dist = torch.distributions.Normal(action_mean, action_std)
         return action_dist, values
 
     def forward(self, observations, state=None):
-        """Forward pass during training."""
-        return self.forward_eval(observations, state)
+        """Forward pass during training (handles bptt_horizon sequence dimension)."""
+        # observations: (segments, bptt_horizon, obs_dim)
+        B, T, _ = observations.shape
+        hidden = self.encoder(observations)  # (B, T, H)
+        hidden, _ = self.lstm(hidden)  # (B, T, rnn_H)
+        hidden = hidden.reshape(B * T, -1)  # (B*T, rnn_H)
+        hidden = self.decoder(hidden)
+        action_mean = self.action_mean(hidden)
+        action_logstd = self.action_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        values = self.value_head(hidden)
+        action_dist = torch.distributions.Normal(action_mean, action_std)
+        return action_dist, values
 
 
 
@@ -132,8 +162,9 @@ def train(args, wandb_group=None):
     # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
     rollouts_multiplier = 32
+    bptt_horizon = 16
     train_config['batch_size'] = args.num_envs * rollouts_multiplier
-    train_config['bptt_horizon'] = 'auto'
+    train_config['bptt_horizon'] = bptt_horizon
     train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
 
     # PPO hyperparameters from CLI args

@@ -165,6 +165,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         )
         self.num_envs = num_envs
         self.num_agents = num_envs  # For PufferLib compatibility
+        self.agents_per_batch = num_envs
         super().__init__()
 
         self.device = torch.device(device)
