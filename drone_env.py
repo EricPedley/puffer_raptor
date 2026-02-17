@@ -458,7 +458,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             angular_acc = inertia_inv * (torque_body - gyroscopic)
 
             # Update angular velocity
-            angular_velocity = torch.clamp(angular_velocity + angular_acc * dt, -1e12, 1e12)
+            angular_velocity = torch.clamp(angular_velocity + angular_acc * dt, -1e2, 1e2)
 
             # Update quaternion: dq/dt = 0.5 * q * omega_quat
             omega_quat = torch.cat([
@@ -522,8 +522,12 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rewards = rewards + goal_reached.float() * 1.0
 
         # Check for termination (died / OOB)
-        died = (position[:, 2] < 0.1) | (position[:, 2] > 2.0)
+        died = distance_to_goal > 5
         rewards = rewards - died.float() * 1.0
+
+        # rewards = torch.where(torch.isnan(rewards), torch.full_like(rewards, -1e5), rewards)
+
+        # assert torch.isnan(rewards).sum() == 0
 
         return (
             rotor_speeds,

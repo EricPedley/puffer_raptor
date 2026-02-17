@@ -19,8 +19,8 @@ from drone_env import QuadcopterEnv
 from export import export_weights
 
 
-def load_pufferlib_config():
-    """Load PufferLib's default.ini config without argparse (avoids sys.argv conflicts)."""
+def load_config(drone_ini_path='drone.ini'):
+    """Load pufferlib default.ini as base, then override with drone.ini."""
     puffer_dir = os.path.dirname(os.path.realpath(pufferlib.__file__))
     default_ini = os.path.join(puffer_dir, 'config', 'default.ini')
 
@@ -34,15 +34,12 @@ def load_pufferlib_config():
                 value = ast.literal_eval(p[section][key])
             except:
                 value = p[section][key]
-
-            # Build nested dict from dotted section names
             parts = section.split('.')
             d = config
             for part in parts:
                 d = d.setdefault(part, {})
             d[key] = value
 
-    # Flatten top-level sections (base keys go to root)
     result = defaultdict(dict)
     for key, value in config.items():
         if isinstance(value, dict):
@@ -50,8 +47,23 @@ def load_pufferlib_config():
         else:
             result[key] = value
 
-    result['train']['use_rnn'] = True
+    # Override with drone.ini
+    dp = configparser.ConfigParser()
+    dp.read(drone_ini_path)
+    for section in dp.sections():
+        for key in dp[section]:
+            try:
+                value = ast.literal_eval(dp[section][key])
+            except:
+                value = dp[section][key]
+            parts = section.split('.')
+            d = result
+            for part in parts:
+                d = d.setdefault(part, {})
+            d[key] = value
+
     return result
+
 
 class Policy(torch.nn.Module):
     """LSTM policy for continuous control."""
@@ -125,20 +137,25 @@ def train(args, wandb_group=None):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
 
-    # Create vectorized environment (PufferLib creates multiple env copies)
+    # Load config from drone.ini (with pufferlib defaults as base)
+    config = load_config(args.config_ini)
+    train_config = config['train']
+    env_config = config.get('env', {})
+    policy_config = config.get('policy', {})
+
+    # Create vectorized environment
     vecenv = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
-        lin_vel_reward_scale=args.lin_vel_reward_scale,
-        ang_vel_reward_scale=args.ang_vel_reward_scale,
-        distance_to_goal_reward_scale=args.distance_to_goal_reward_scale,
         dynamics_randomization_delta=args.dynamics_randomization_delta,
         device=args.device,
         use_compile=True
     )
 
-    # Create policy
-    policy = Policy(vecenv.driver_env, hidden_size=args.hidden_size).to(args.device)
+    # Create policy from ini config
+    hidden_size = policy_config.get('linear_size', 64)
+    rnn_hidden_size = policy_config.get('lstm_size', 16)
+    policy = Policy(vecenv.driver_env, hidden_size=hidden_size, rnn_hidden_size=rnn_hidden_size).to(args.device)
 
     # Load checkpoint if provided
     if args.checkpoint:
@@ -150,37 +167,15 @@ def train(args, wandb_group=None):
     print(f"Training PPO agent on {args.num_envs} parallel environments")
     print(f"Observation space: {vecenv.single_observation_space.shape}")
     print(f"Action space: {vecenv.single_action_space.shape}")
-    print(f"Total timesteps: {args.total_timesteps}")
+    print(f"Policy: linear_size={hidden_size}, lstm_size={rnn_hidden_size}")
+    print(f"Total timesteps: {train_config.get('total_timesteps', args.total_timesteps)}")
 
-    # Load base config and override with command-line arguments
-    config = load_pufferlib_config()
-    train_config = config['train']
-
+    # Set env name for dashboard
     train_config['env'] = "l2f drone"
 
-    # Sampling and batch parameters (matching SKRL config)
-    # SKRL: rollouts=32, so batch_size = num_envs * rollouts
-    train_config['total_timesteps'] = args.total_timesteps
-    rollouts_multiplier = 32
-    bptt_horizon = 16
-    train_config['batch_size'] = args.num_envs * rollouts_multiplier
-    train_config['bptt_horizon'] = bptt_horizon
-    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
-
-    # PPO hyperparameters from CLI args
-    train_config['update_epochs'] = args.update_epochs
-    train_config['gamma'] = args.gamma
-    train_config['gae_lambda'] = args.gae_lambda
-    train_config['clip_coef'] = args.clip_coef
-    train_config['vf_clip_coef'] = 0.2
-    train_config['vf_coef'] = args.vf_coef
-    train_config['ent_coef'] = args.ent_coef
-    train_config['max_grad_norm'] = 1.0
-
-    # Optimizer
-    train_config['optimizer'] = 'muon'
-    train_config['learning_rate'] = args.learning_rate
-    train_config['anneal_lr'] = True
+    # Override total_timesteps from CLI if provided
+    if args.total_timesteps is not None:
+        train_config['total_timesteps'] = args.total_timesteps
 
     # Initialize wandb early to get run ID for log directory
     logger = None
@@ -203,10 +198,13 @@ def train(args, wandb_group=None):
 
     # Copy flight params and save config snapshot
     shutil.copy(args.config_path, os.path.join(log_dir, "flight_params.json"))
+    shutil.copy(args.config_ini, os.path.join(log_dir, "drone.ini"))
     with open(os.path.join(log_dir, "config.json"), 'w') as f:
         json.dump({
             "args": vars(args),
             "train_config": dict(train_config),
+            "env_config": dict(env_config),
+            "policy_config": dict(policy_config),
             "run_id": run_id,
             "wandb_url": wandb_url,
             "timestamp": datetime.now().isoformat(),
@@ -228,9 +226,8 @@ def train(args, wandb_group=None):
 
     start_time = time()
     mean_reward = 0.0
-    # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 2*60:
+        while time() - start_time < 5*60:
             trainer.evaluate()
             logs = trainer.train()
 
@@ -238,7 +235,7 @@ def train(args, wandb_group=None):
                 mean_reward = logs['environment/episode_reward_mean']
 
             if trainer.global_step % args.print_interval == 0:
-                print(f"Step: {trainer.global_step}/{args.total_timesteps}")
+                print(f"Step: {trainer.global_step}/{train_config['total_timesteps']}")
                 if logs:
                     print(f"  Logs: {logs}")
     finally:
@@ -275,7 +272,7 @@ def run_sweep(args):
     print(f"Sweep group: {sweep_group}")
     print(f"View aggregate results in wandb by filtering group = {sweep_group}")
 
-    config = load_pufferlib_config()
+    config = load_config(args.config_ini)
     sweep_config = config.pop('sweep', {})
     method = sweep_config.pop('method', 'Protein')
 
@@ -297,12 +294,6 @@ def run_sweep(args):
             if key in config['train']:
                 setattr(args, key.replace('-', '_'), config['train'][key])
 
-        # Override env parameters if suggested
-        env_config = config.get('env', {})
-        for key in ['distance_to_goal_reward_scale', 'dynamics_randomization_delta']:
-            if key in env_config:
-                setattr(args, key.replace('-', '_'), env_config[key])
-
         start = time()
         score = train(args, wandb_group=sweep_group)
         duration = time() - start
@@ -314,35 +305,21 @@ def run_sweep(args):
 def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
-    # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=2048, help="Number of parallel environments")
+    # Config file
+    parser.add_argument("--config-ini", type=str, default="drone.ini", help="Path to drone.ini config file")
+
+    # Environment parameters (CLI overrides)
+    parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
-    parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
-    parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
-    parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
-    parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
-    parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.0, help="Dynamics randomization range")
 
-    # Training parameters
-    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
-    parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
-
-    # PPO hyperparameters
-    parser.add_argument("--learning-rate", type=float, default=5.0e-04, help="Learning rate")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
-    parser.add_argument("--clip-coef", type=float, default=0.2, help="PPO clip coefficient")
-    parser.add_argument("--vf-coef", type=float, default=2.0, help="Value function loss coefficient")
-    parser.add_argument("--ent-coef", type=float, default=0.0, help="Entropy loss coefficient")
-    parser.add_argument("--update-epochs", type=int, default=8, help="PPO update epochs per rollout")
+    # Training parameters (CLI overrides, ini values take precedence for most hparams)
+    parser.add_argument("--total-timesteps", type=int, default=None, help="Total training timesteps (overrides ini)")
 
     # Logging and checkpointing
-    parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases logging")
     parser.add_argument("--wandb-project", type=str, default="puffer-raptor", help="W&B project name")
     parser.add_argument("--print-interval", type=int, default=10000, help="Print stats interval")
-    parser.add_argument("--checkpoint-interval", type=int, default=100000, help="Checkpoint save interval (0 to disable)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint .pt file to resume from")
 
     # Sweep
