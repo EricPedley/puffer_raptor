@@ -88,6 +88,7 @@ def main():
 
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint (auto-find latest if not specified)")
+    parser.add_argument("--latest", action="store_true", help="Use model.pt from the most recent logs/ subfolder")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size of policy")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -101,7 +102,14 @@ def main():
     torch.manual_seed(args.seed)
 
     # Find checkpoint
-    if args.checkpoint is None:
+    if args.latest:
+        logs_dir = Path(__file__).parent / "logs"
+        subdirs = [d for d in logs_dir.iterdir() if d.is_dir()]
+        if not subdirs:
+            raise FileNotFoundError("No subdirectories found in logs/")
+        latest_dir = max(subdirs, key=lambda d: d.stat().st_mtime)
+        checkpoint_path = str(latest_dir / "model.pt")
+    elif args.checkpoint is None:
         checkpoint_path = find_latest_checkpoint(args.exp_name)
     else:
         checkpoint_path = args.checkpoint
