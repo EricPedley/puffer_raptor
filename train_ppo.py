@@ -227,7 +227,7 @@ def train(args, wandb_group=None):
     start_time = time()
     mean_reward = 0.0
     try:
-        while time() - start_time < 5*60:
+        while trainer.global_step < train_config['total_timesteps']:
             trainer.evaluate()
             logs = trainer.train()
 
@@ -309,7 +309,7 @@ def main():
     parser.add_argument("--config-ini", type=str, default="drone.ini", help="Path to drone.ini config file")
 
     # Environment parameters (CLI overrides)
-    parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=8*16*64, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--dynamics-randomization-delta", type=float, default=0.0, help="Dynamics randomization range")
 

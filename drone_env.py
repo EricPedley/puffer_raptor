@@ -141,7 +141,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        max_episode_length_seconds: float = 5,
+        max_episode_length_seconds: float = 20,
         sim_dt: float = 0.002,
         decimation_steps: int = 5,
         dynamics_randomization_delta: float = 0.0,
@@ -150,7 +150,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         use_compile: bool = False,
         compile_mode: str = "reduce-overhead",
     ):
-        self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32) # should be (-1, 1) but in isaaclab it's inf so we're sticking with that
+        self.single_action_space = gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
         # Observations: velocity_body (3) + angular_velocity (3) + gravity_body (3) +
         #               rel_pos_body (3) + orientation_error_axis_angle (3) + rpm_scaled (4) = 19
         self.single_observation_space = gym.spaces.Box(
@@ -491,17 +491,17 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Goal-reached detection
         goal_reached = (
-            (distance_to_goal < 0.5) &
-            (omega_magnitude < 0.5) &
-            (vel_magnitude < 0.1)
+            (distance_to_goal < 0.05) &
+            (omega_magnitude < 0.05) &
+            (vel_magnitude < 0.01)
         )
 
         # Bonuses/penalties
-        rewards = rewards + goal_reached.float() * 10.0
+        rewards = rewards + goal_reached.float() * 1.0
 
         # Check for termination (died / OOB)
-        died = distance_to_goal > 5
-        rewards = rewards - died.float() * 10.0
+        died = distance_to_goal > 1.5
+        rewards = rewards - died.float() * 1.0
 
         # rewards = torch.where(torch.isnan(rewards), torch.full_like(rewards, -1e5), rewards)
 
@@ -604,16 +604,20 @@ class QuadcopterEnv(pufferlib.PufferEnv):
                 1.0 + torch.zeros((num_reset, *self._nominal_falling_delay_constants.shape), device=self.device).uniform_(-delta, delta)
             )
 
-        # Sample new goal positions
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        # Sample new goal positions within 0.5 meter sphere
+        # Uniformly sample direction on unit sphere (Box-Muller / normal method)
+        direction = torch.randn(len(env_ids), 3, device=self.device)
+        direction = direction / direction.norm(dim=-1, keepdim=True)
+        # Uniformly sample radius: r = R * cbrt(U) gives uniform volume density
+        radius = 0.5 * torch.zeros(len(env_ids), 1, device=self.device).uniform_(0.0, 1.0).pow(1.0 / 3.0)
+        self._desired_pos_w[env_ids] = direction * radius
 
         # Sample new goal orientations (z-axis rotations only)
         yaw_angles = torch.zeros(len(env_ids), device=self.device).uniform_(-np.pi, np.pi)
         self._desired_quat_w[env_ids] = quaternion_from_z_rotation(yaw_angles)
 
         # Reset quadcopter state to origin with identity orientation
-        self._position[env_ids] = torch.tensor([0.0, 0.0, 1.0], device=self.device)
+        self._position[env_ids] = torch.tensor([0.0, 0.0, 0.0], device=self.device)
         self._velocity[env_ids] = 0.0
         self._quaternion[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
         self._angular_velocity[env_ids] = 0.0
