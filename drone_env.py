@@ -141,16 +141,9 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        max_episode_length_seconds: float = 40,
-        sim_dt: float = 0.01,
-        decimation_steps: int = 2,
-        lin_vel_reward_scale: float = -0.05,
-        ang_vel_reward_scale: float = -0.01,
-        distance_to_goal_reward_scale: float = 15.0,
-        orientation_reward_scale: float = 15.0,
-        goal_position_threshold: float = 0.2,
-        goal_orientation_threshold: float = 0.3,
-        goal_velocity_threshold: float = 0.5,
+        max_episode_length_seconds: float = 5,
+        sim_dt: float = 0.002,
+        decimation_steps: int = 5,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
@@ -161,7 +154,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Observations: velocity_body (3) + angular_velocity (3) + gravity_body (3) +
         #               rel_pos_body (3) + orientation_error_axis_angle (3) + rpm_scaled (4) = 19
         self.single_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(3+3+4+3+3+4,), dtype=np.float32
         )
         self.num_envs = num_envs
         self.num_agents = num_envs  # For PufferLib compatibility
@@ -171,13 +164,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.device = torch.device(device)
         self.dt = sim_dt
         self.max_episode_length = int(max_episode_length_seconds / (sim_dt * decimation_steps))
-        self.lin_vel_reward_scale = lin_vel_reward_scale
-        self.ang_vel_reward_scale = ang_vel_reward_scale
-        self.distance_to_goal_reward_scale = distance_to_goal_reward_scale
-        self.orientation_reward_scale = orientation_reward_scale
-        self.goal_position_threshold = goal_position_threshold
-        self.goal_orientation_threshold = goal_orientation_threshold
-        self.goal_velocity_threshold = goal_velocity_threshold
         self.dynamics_randomization_delta = dynamics_randomization_delta
         self.render_mode = render_mode
 
@@ -318,9 +304,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._max_rpm,
             self._decimation_steps,
             prev_position,
-            self.goal_position_threshold,
-            self.goal_orientation_threshold,
-            self.goal_velocity_threshold,
         )
 
         # Build rewards dict for logging (outside compiled region)
@@ -407,9 +390,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         max_rpm: float,
         decimation_steps: int,
         prev_position: torch.Tensor,
-        goal_position_threshold: float,
-        goal_orientation_threshold: float,
-        goal_velocity_threshold: float,
     ):
         """Pure computation kernel - decimation loop + obs/reward in one compilable function."""
         # Run decimation_steps of physics integration
@@ -471,9 +451,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Compute observations (once, after all physics sub-steps)
         velocity_body = rotate_vector_by_quaternion_conj(velocity, quaternion)
-        gravity_body = rotate_vector_by_quaternion_conj(
-            gravity_unit.unsqueeze(0).expand(position.shape[0], -1), quaternion
-        )
         rel_pos_world = desired_pos_w - position
         rel_pos_body = rotate_vector_by_quaternion_conj(rel_pos_world, quaternion)
         rpm_scaled = rotor_speeds / max_rpm
@@ -482,9 +459,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         observations = torch.cat([
             velocity_body,           # 3
             angular_velocity,        # 3
-            gravity_body,            # 3
-            rel_pos_body,            # 3
-            orientation_error,       # 3
+            quaternion,
+            torch.tanh(rel_pos_body*0.1),            # 3
+            torch.tanh(rel_pos_body*10),            # 3
+            # missing target orientation obs but whatever for now
             rpm_scaled               # 4
         ], dim=-1)
 
@@ -513,17 +491,17 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Goal-reached detection
         goal_reached = (
-            (distance_to_goal < goal_position_threshold) &
-            (orientation_error_magnitude < goal_orientation_threshold) &
-            (vel_magnitude < goal_velocity_threshold)
+            (distance_to_goal < 0.5) &
+            (omega_magnitude < 0.5) &
+            (vel_magnitude < 0.1)
         )
 
         # Bonuses/penalties
-        rewards = rewards + goal_reached.float() * 1.0
+        rewards = rewards + goal_reached.float() * 10.0
 
         # Check for termination (died / OOB)
         died = distance_to_goal > 5
-        rewards = rewards - died.float() * 1.0
+        rewards = rewards - died.float() * 10.0
 
         # rewards = torch.where(torch.isnan(rewards), torch.full_like(rewards, -1e5), rewards)
 
@@ -561,15 +539,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         rpm_scaled = self._rotor_speeds / self._max_rpm
 
-        # Compute orientation error as axis-angle (in body frame)
-        orientation_error = quaternion_error_axis_angle(self._quaternion, self._desired_quat_w)
-
         obs = torch.cat([
             velocity_body,           # 3
-            self._angular_velocity,  # 3
-            gravity_body,            # 3
-            rel_pos_body,            # 3
-            orientation_error,       # 3
+            self._angular_velocity,        # 3
+            self._quaternion, # 4
+            torch.tanh(rel_pos_body*0.1),            # 3
+            torch.tanh(rel_pos_body*10),            # 3
+            # missing target orientation obs but whatever for now
             rpm_scaled               # 4
         ], dim=-1)
 
