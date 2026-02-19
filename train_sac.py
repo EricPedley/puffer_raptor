@@ -18,15 +18,15 @@ import time
 from datetime import datetime
 
 import numpy as np
+import pufferlib.pytorch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
 from drone_env import QuadcopterEnv
+from export import export_weights
 
-
-# ── Networks (hidden=32, TANH — matching rl-tools ACTOR_HIDDEN_DIM=32, TANH) ──
 
 LOG_STD_MAX = 2
 LOG_STD_MIN = -5
@@ -36,8 +36,8 @@ class SoftQNetwork(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_size):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, hidden_size), nn.Tanh(),
-            nn.Linear(hidden_size, hidden_size), nn.Tanh(),
+            nn.Linear(obs_dim + action_dim, hidden_size), nn.ELU(),
+            nn.Linear(hidden_size, hidden_size), nn.ELU(),
             nn.Linear(hidden_size, 1),
         )
 
@@ -46,6 +46,32 @@ class SoftQNetwork(nn.Module):
 
 
 class Actor(nn.Module):
+    """Same architecture as train_ppo.py Policy — ELU MLP + action_mean + global action_logstd.
+    Structured so export_weights() works directly (expects .net and .action_mean)."""
+    def __init__(self, obs_dim, action_dim, hidden_size):
+        super().__init__()
+        self.net = nn.Sequential(
+            pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden_size)),
+            nn.ELU(),
+            pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.ELU(),
+        )
+        self.action_mean   = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, action_dim), std=0.01)
+        self.action_logstd = nn.Parameter(torch.zeros(1, action_dim))
+
+    def get_action(self, x):
+        hidden  = self.net(x)
+        mean    = self.action_mean(hidden)
+        log_std = self.action_logstd.expand_as(mean).clamp(LOG_STD_MIN, LOG_STD_MAX)
+        std     = log_std.exp()
+        normal  = torch.distributions.Normal(mean, std)
+        x_t     = normal.rsample()
+        y_t     = torch.tanh(x_t)
+        log_prob = normal.log_prob(x_t) - torch.log(1 - y_t.pow(2) + 1e-6)
+        log_prob = log_prob.sum(-1, keepdim=True)
+        return y_t, log_prob, torch.tanh(mean)
+
+class Actor_Old(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_size):
         super().__init__()
         self.net = nn.Sequential(
@@ -273,6 +299,7 @@ def train(args):
         path = os.path.join(log_dir, "model.pt")
         torch.save({"actor": actor.state_dict(), "qf1": qf1.state_dict(),
                     "qf2": qf2.state_dict(), "global_step": global_step}, path)
+        export_weights(actor, os.path.join(log_dir, "neural_network.c"), run_id=run_id)
         print(f"Saved to {path}")
         if args.wandb:
             import wandb
