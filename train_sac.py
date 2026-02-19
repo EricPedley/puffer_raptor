@@ -36,8 +36,8 @@ class SoftQNetwork(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_size):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, hidden_size), nn.ELU(),
-            nn.Linear(hidden_size, hidden_size), nn.ELU(),
+            nn.Linear(obs_dim + action_dim, hidden_size), nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size), nn.Tanh(),
             nn.Linear(hidden_size, 1),
         )
 
