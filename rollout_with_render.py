@@ -9,6 +9,7 @@ from pathlib import Path
 
 from drone_env import QuadcopterEnv
 from train_ppo import Policy
+from train_sac import Actor
 
 
 def find_latest_checkpoint(exp_name: str = "quadcopter_ppo") -> str:
@@ -28,17 +29,39 @@ def find_latest_checkpoint(exp_name: str = "quadcopter_ppo") -> str:
     return latest
 
 
-def load_checkpoint(checkpoint_path: str, policy: torch.nn.Module, device: str):
-    """Load checkpoint into policy."""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    policy.load_state_dict(checkpoint['policy_state_dict'])
-    global_step = checkpoint.get('global_step', 0)
-    return global_step
+def load_policy(checkpoint_path: str, env: QuadcopterEnv, hidden_size: int, device: str):
+    """Detect checkpoint type from keys and load the appropriate policy class."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    is_sac = "qf1" in checkpoint
+    if is_sac:
+        print("Detected SAC checkpoint")
+        policy = Actor(
+            obs_dim=env.single_observation_space.shape[0],
+            action_dim=env.single_action_space.shape[0],
+            hidden_size=hidden_size,
+        ).to(device)
+    else:
+        print("Detected PPO checkpoint")
+        policy = Policy(env, hidden_size=hidden_size).to(device)
+    policy.load_state_dict(checkpoint["policy_state_dict"])
+    global_step = checkpoint.get("global_step", 0)
+    return policy, is_sac, global_step
+
+
+def get_action(policy: torch.nn.Module, obs: torch.Tensor, is_sac: bool) -> torch.Tensor:
+    """Get deterministic action from either policy type."""
+    if is_sac:
+        _, _, mean = policy.get_action(obs)
+        return mean
+    else:
+        action_dist, _ = policy.forward_eval(obs)
+        return action_dist.mean
 
 
 def run_rollout(
     policy: torch.nn.Module,
     env: QuadcopterEnv,
+    is_sac: bool,
     num_episodes: int = 1,
     max_steps: int = None,
     device: str = "cuda",
@@ -56,9 +79,7 @@ def run_rollout(
 
     with torch.no_grad():
         while True:
-            # Get action from policy
-            action_dist, value = policy.forward_eval(obs)
-            actions = action_dist.mean  # Use deterministic actions (mean of distribution)
+            actions = get_action(policy, obs, is_sac)
 
             # Step environment
             obs, rewards, terminals, truncations, infos = env.step(actions)
@@ -127,17 +148,15 @@ def main():
         render_mode="human",  # Enable rendering
     )
 
-    # Create policy
-    policy = Policy(env, hidden_size=args.hidden_size).to(args.device)
-
-    # Load checkpoint
-    global_step = load_checkpoint(checkpoint_path, policy, args.device)
+    # Load checkpoint (auto-detects PPO vs SAC from keys)
+    policy, is_sac, global_step = load_policy(checkpoint_path, env, args.hidden_size, args.device)
     print(f"Loaded checkpoint from step {global_step}")
 
     # Run rollout
     run_rollout(
         policy=policy,
         env=env,
+        is_sac=is_sac,
         num_episodes=args.num_episodes,
         device=args.device,
     )
