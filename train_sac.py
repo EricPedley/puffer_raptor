@@ -118,23 +118,6 @@ def train(args):
     env = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
-        max_episode_length_seconds=5.0,      # EPISODE_STEP_LIMIT=500 @ 100Hz
-        rwd_scale=1.0,
-        rwd_constant=0.5,                    # rl-tools: 0.5 (not 1.5)
-        rwd_termination_penalty=-100.0,
-        rwd_position=1.0,
-        rwd_orientation=0.1,                 # rl-tools: 0.1 (not 0.2)
-        rwd_d_action=1.0,
-        term_position=1.0,                   # rl-tools: 1m (not 2m)
-        term_linear_velocity=2.0,
-        term_angular_velocity=35.0,
-        init_guidance=0.1,
-        init_max_position=0.5,               # rl-tools init_90_deg: 0.5m (not 1m)
-        init_max_angle=np.pi / 2,
-        init_max_linear_velocity=1.0,
-        init_max_angular_velocity=1.0,
-        dynamics_randomization_delta=args.dynamics_randomization_delta,
-        device=args.device,
         use_compile=True,
     )
 
@@ -269,7 +252,7 @@ def train(args):
 
     finally:
         path = os.path.join(log_dir, "model.pt")
-        torch.save({"actor": actor.state_dict(), "qf1": qf1.state_dict(),
+        torch.save({"policy_state_dict": actor.state_dict(), "qf1": qf1.state_dict(),
                     "qf2": qf2.state_dict(), "global_step": global_step}, path)
         export_weights(actor, os.path.join(log_dir, "neural_network.c"), run_id=run_id)
         print(f"Saved to {path}")
@@ -294,7 +277,7 @@ def main():
     p.add_argument("--learning-starts", type=int, default=1000)   # N_WARMUP_STEPS=1000
     p.add_argument("--policy-lr", type=float, default=1e-3)       # rl-tools: 1e-3
     p.add_argument("--q-lr", type=float, default=1e-3)            # rl-tools: 1e-3
-    p.add_argument("--policy-frequency", type=int, default=2)     # actor every 2 critic steps
+    p.add_argument("--policy-frequency", type=int, default=1)     # actor every 2 critic steps
     p.add_argument("--target-network-frequency", type=int, default=1)
     # Run
     p.add_argument("--train-minutes", type=float, default=120.0)
