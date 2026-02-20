@@ -71,34 +71,6 @@ class Actor(nn.Module):
         log_prob = log_prob.sum(-1, keepdim=True)
         return y_t, log_prob, torch.tanh(mean)
 
-class Actor_Old(nn.Module):
-    def __init__(self, obs_dim, action_dim, hidden_size):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_size), nn.Tanh(),
-            nn.Linear(hidden_size, hidden_size), nn.Tanh(),
-        )
-        self.fc_mean = nn.Linear(hidden_size, action_dim)
-        self.fc_logstd = nn.Linear(hidden_size, action_dim)
-
-    def forward(self, x):
-        h = self.net(x)
-        mean = self.fc_mean(h)
-        log_std = torch.tanh(self.fc_logstd(h))
-        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
-        return mean, log_std
-
-    def get_action(self, x):
-        mean, log_std = self(x)
-        std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()
-        y_t = torch.tanh(x_t)
-        # action is tanh-squashed; drone_env clamps to [-1,1] anyway
-        log_prob = normal.log_prob(x_t) - torch.log(1 - y_t.pow(2) + 1e-6)
-        log_prob = log_prob.sum(-1, keepdim=True)
-        return y_t, log_prob, torch.tanh(mean)
-
 
 # ── GPU-resident replay buffer ─────────────────────────────────────────────────
 
