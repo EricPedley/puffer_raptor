@@ -128,10 +128,10 @@ def train(args, wandb_group=None):
     # Sampling and batch parameters (matching SKRL config)
     # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
-    rollouts_multiplier = 32
+    rollouts_multiplier = 128
     train_config['batch_size'] = args.num_envs * rollouts_multiplier
     train_config['bptt_horizon'] = 'auto'
-    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
+    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)//8
 
     # PPO hyperparameters from CLI args
     train_config['update_epochs'] = args.update_epochs
@@ -288,17 +288,17 @@ def main():
     parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
 
     # Training parameters
-    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size")
+    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
 
     # PPO hyperparameters
     parser.add_argument("--learning-rate", type=float, default=5.0e-04, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
-    parser.add_argument("--clip-coef", type=float, default=0.2, help="PPO clip coefficient")
-    parser.add_argument("--vf-coef", type=float, default=2.0, help="Value function loss coefficient")
-    parser.add_argument("--ent-coef", type=float, default=0.0, help="Entropy loss coefficient")
-    parser.add_argument("--update-epochs", type=int, default=8, help="PPO update epochs per rollout")
+    parser.add_argument("--gae-lambda", type=float, default=0.98, help="GAE lambda")
+    parser.add_argument("--clip-coef", type=float, default=0.1, help="PPO clip coefficient")
+    parser.add_argument("--vf-coef", type=float, default=0.5, help="Value function loss coefficient")
+    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy loss coefficient")
+    parser.add_argument("--update-epochs", type=int, default=4, help="PPO update epochs per rollout")
 
     # Logging and checkpointing
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
