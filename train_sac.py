@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os
+os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
+
 """SAC on the quadcopter env, reproducing the rl-tools L2F SAC setup.
 
 rl-tools reference: src/rl/environments/l2f/sac/parameters.h
@@ -138,10 +141,52 @@ def train(args):
     # Auto-entropy tuning — matching rl-tools ENTROPY_BONUS=true
     target_entropy = -float(action_dim)
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
-    alpha = log_alpha.exp().item()
+    alpha = log_alpha.detach().exp()   # tensor, not float
     a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
 
     rb = ReplayBuffer(args.buffer_size, obs_dim, action_dim, device)
+
+    # ── Factored update functions (compilable) ──────────────────────────────────
+
+    def update_main(b_obs, b_next_obs, b_actions, b_rewards, b_dones):
+        """Critic update. Returns qf_loss tensor."""
+        with torch.no_grad():
+            next_actions, next_log_pi, _ = actor.get_action(b_next_obs)
+            qf1_next = qf1_target(b_next_obs, next_actions)
+            qf2_next = qf2_target(b_next_obs, next_actions)
+            min_qf_next = torch.min(qf1_next, qf2_next) - alpha * next_log_pi
+            next_q = b_rewards + (1 - b_dones) * args.gamma * min_qf_next
+
+        qf1_val  = qf1(b_obs, b_actions)
+        qf2_val  = qf2(b_obs, b_actions)
+        qf1_loss = F.mse_loss(qf1_val, next_q)
+        qf2_loss = F.mse_loss(qf2_val, next_q)
+        qf_loss  = qf1_loss + qf2_loss
+        q_optimizer.zero_grad()
+        qf_loss.backward()
+        q_optimizer.step()
+        return qf_loss.detach()
+
+    def update_pol(b_obs):
+        """Actor + entropy update. Returns (actor_loss, alpha_loss) tensors."""
+        pi, log_pi, _ = actor.get_action(b_obs)
+        min_qf_pi = torch.min(qf1(b_obs, pi), qf2(b_obs, pi))
+        actor_loss = (alpha * log_pi - min_qf_pi).mean()
+        actor_optimizer.zero_grad()
+        actor_loss.backward()
+        actor_optimizer.step()
+
+        with torch.no_grad():
+            _, log_pi2, _ = actor.get_action(b_obs)
+        alpha_loss = (-log_alpha.exp() * (log_pi2 + target_entropy)).mean()
+        a_optimizer.zero_grad()
+        alpha_loss.backward()
+        a_optimizer.step()
+        return actor_loss.detach(), alpha_loss.detach()
+
+    if args.compile:
+        update_main = torch.compile(update_main)
+        update_pol  = torch.compile(update_pol)
 
     # Logging
     run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -153,7 +198,7 @@ def train(args):
         import wandb
         wandb.init(project=args.wandb_project, group="sac", config=vars(args), name=f"sac_{run_id}")
 
-    print(f"SAC | obs={obs_dim} act={action_dim} envs={args.num_envs} hidden={args.hidden_size}")
+    print(f"SAC | obs={obs_dim} act={action_dim} envs={args.num_envs} hidden={args.hidden_size} compile={args.compile}")
     print(f"Log: {log_dir}")
 
     obs, _ = env.reset()
@@ -163,6 +208,7 @@ def train(args):
 
     global_step = 0
     actor_loss  = torch.tensor(0.0)
+    qf_loss     = torch.tensor(0.0)
     start_time  = time.time()
 
     try:
@@ -176,11 +222,11 @@ def train(args):
                 with torch.no_grad():
                     actions, _, _ = actor.get_action(obs)
 
-            next_obs, rewards, terminated, truncated, infos = env.step(actions)
+            next_obs, rewards, terminated, _, infos = env.step(actions)
 
             if not isinstance(next_obs, torch.Tensor):
                 next_obs = torch.as_tensor(next_obs, device=device, dtype=torch.float32)
-            rewards_t   = rewards if isinstance(rewards, torch.Tensor) else torch.as_tensor(rewards, device=device, dtype=torch.float32)
+            rewards_t    = rewards if isinstance(rewards, torch.Tensor) else torch.as_tensor(rewards, device=device, dtype=torch.float32)
             terminated_t = terminated if isinstance(terminated, torch.Tensor) else torch.as_tensor(terminated, device=device)
 
             # Store — use terminated only as done (not truncated) so we bootstrap
@@ -193,47 +239,20 @@ def train(args):
             if global_step >= args.learning_starts and len(rb) >= args.batch_size:
                 b_obs, b_next_obs, b_actions, b_rewards, b_dones = rb.sample(args.batch_size)
 
-                # Critic update
-                with torch.no_grad():
-                    next_actions, next_log_pi, _ = actor.get_action(b_next_obs)
-                    qf1_next = qf1_target(b_next_obs, next_actions)
-                    qf2_next = qf2_target(b_next_obs, next_actions)
-                    min_qf_next = torch.min(qf1_next, qf2_next) - alpha * next_log_pi
-                    next_q = b_rewards + (1 - b_dones) * args.gamma * min_qf_next
+                qf_loss = update_main(b_obs, b_next_obs, b_actions, b_rewards, b_dones)
 
-                qf1_val  = qf1(b_obs, b_actions)
-                qf2_val  = qf2(b_obs, b_actions)
-                qf1_loss = F.mse_loss(qf1_val, next_q)
-                qf2_loss = F.mse_loss(qf2_val, next_q)
-                qf_loss  = qf1_loss + qf2_loss
-                q_optimizer.zero_grad()
-                qf_loss.backward()
-                q_optimizer.step()
-
-                # Actor update every 2 critic steps — rl-tools ACTOR_TRAINING_INTERVAL=2x
+                # Actor update every policy_frequency critic steps — rl-tools ACTOR_TRAINING_INTERVAL=2x
                 if global_step % (args.policy_frequency * args.num_envs) == 0:
                     for _ in range(args.policy_frequency):
-                        pi, log_pi, _ = actor.get_action(b_obs)
-                        min_qf_pi = torch.min(qf1(b_obs, pi), qf2(b_obs, pi))
-                        actor_loss = (alpha * log_pi - min_qf_pi).mean()
-                        actor_optimizer.zero_grad()
-                        actor_loss.backward()
-                        actor_optimizer.step()
+                        actor_loss, _ = update_pol(b_obs)
+                    alpha.copy_(log_alpha.detach().exp())
 
-                        with torch.no_grad():
-                            _, log_pi2, _ = actor.get_action(b_obs)
-                        alpha_loss = (-log_alpha.exp() * (log_pi2 + target_entropy)).mean()
-                        a_optimizer.zero_grad()
-                        alpha_loss.backward()
-                        a_optimizer.step()
-                        alpha = log_alpha.exp().item()
-
-                # Soft target update
+                # Soft target update via lerp_
                 if global_step % args.target_network_frequency == 0:
                     for p, tp in zip(qf1.parameters(), qf1_target.parameters()):
-                        tp.data.copy_(args.tau * p.data + (1 - args.tau) * tp.data)
+                        tp.data.lerp_(p.data, args.tau)
                     for p, tp in zip(qf2.parameters(), qf2_target.parameters()):
-                        tp.data.copy_(args.tau * p.data + (1 - args.tau) * tp.data)
+                        tp.data.lerp_(p.data, args.tau)
 
             # Logging
             if global_step % args.print_interval == 0:
@@ -241,13 +260,13 @@ def train(args):
                 ep_rew = infos[0].get("episode_reward_mean", float("nan")) if infos else float("nan")
                 ep_len = infos[0].get("episode_length_mean", float("nan")) if infos else float("nan")
                 print(f"step={global_step:>10,}  sps={sps:>6,}  ep_rew={ep_rew:>8.2f}  "
-                      f"ep_len={ep_len:>6.0f}  alpha={alpha:.4f}  buf={len(rb):,}")
+                      f"ep_len={ep_len:>6.0f}  alpha={alpha.item():.4f}  buf={len(rb):,}")
                 if args.wandb:
                     import wandb
                     wandb.log(dict(
                         global_step=global_step, sps=sps,
                         episode_reward_mean=ep_rew, episode_length_mean=ep_len,
-                        alpha=alpha, qf_loss=qf_loss.item(), actor_loss=actor_loss.item(),
+                        alpha=alpha.item(), qf_loss=qf_loss.item(), actor_loss=actor_loss.item(),
                     ))
 
     finally:
@@ -264,7 +283,7 @@ def train(args):
 def main():
     p = argparse.ArgumentParser()
     # Env
-    p.add_argument("--num-envs", type=int, default=1024)
+    p.add_argument("--num-envs", type=int, default=1024*8)
     p.add_argument("--config-path", type=str, default="meteor75_parameters.json")
     p.add_argument("--dynamics-randomization-delta", type=float, default=0.0)
     # Network — rl-tools: hidden=32, tanh
@@ -272,7 +291,7 @@ def main():
     # SAC hyperparams — rl-tools defaults
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--tau", type=float, default=0.005)
-    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=64*64)
     p.add_argument("--buffer-size", type=int, default=10_000_000)
     p.add_argument("--learning-starts", type=int, default=1000)   # N_WARMUP_STEPS=1000
     p.add_argument("--policy-lr", type=float, default=1e-3)       # rl-tools: 1e-3
@@ -280,8 +299,9 @@ def main():
     p.add_argument("--policy-frequency", type=int, default=1)     # actor every 2 critic steps
     p.add_argument("--target-network-frequency", type=int, default=1)
     # Run
-    p.add_argument("--train-minutes", type=float, default=120.0)
+    p.add_argument("--train-minutes", type=float, default=2.0)
     p.add_argument("--print-interval", type=int, default=10_000)
+    p.add_argument("--compile", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="puffer-raptor")
     p.add_argument("--seed", type=int, default=42)
