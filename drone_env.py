@@ -187,7 +187,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         term_position: float = 1.0,
         term_linear_velocity: float = 2.0,
         term_angular_velocity: float = 35.0,
-        init_guidance: float = 0.9,
+        init_guidance: float = 0.1,
         init_max_position: float = 0.1,
         init_max_angle: float = np.pi / 2,
         init_max_linear_velocity: float = 1.0,
