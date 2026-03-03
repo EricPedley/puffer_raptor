@@ -136,108 +136,44 @@ def quaternion_to_rotation_matrix(q: torch.Tensor) -> torch.Tensor:
 
     return R
 
-
-def sample_random_orientation(num_envs: int, max_angle: float, device: torch.device) -> torch.Tensor:
-    """Sample random orientations as quaternions (w, x, y, z) with angle up to max_angle.
-    Matches rl-tools sample_orientation: uniform random axis, uniform random angle in [0, max_angle].
-    """
-    # Random axis (uniform on unit sphere)
-    u = torch.zeros(num_envs, device=device).uniform_(0, 1)
-    v = torch.zeros(num_envs, device=device).uniform_(0, 1)
-    phi = 2.0 * np.pi * u
-    cos_theta = 1.0 - 2.0 * v
-    sin_theta = torch.sqrt(1.0 - cos_theta * cos_theta)
-    ax = sin_theta * torch.cos(phi)
-    ay = sin_theta * torch.sin(phi)
-    az = cos_theta
-
-    # Random angle in [0, max_angle]
-    angle = torch.zeros(num_envs, device=device).uniform_(0, max_angle)
-
-    half = 0.5 * angle
-    s = torch.sin(half)
-    w = torch.cos(half)
-    x = ax * s
-    y = ay * s
-    z = az * s
-
-    return torch.stack([w, x, y, z], dim=-1)
-
-
 class QuadcopterEnv(pufferlib.PufferEnv):
     def __init__(
         self,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        max_episode_length_seconds: float = 5,
-        sim_dt: float = 0.01,
-        decimation_steps: int = 1,
-        # rl-tools Squared reward parameters (DEFAULT_PARAMETERS_FACTORY defaults)
-        rwd_scale: float = 1.0,
-        rwd_constant: float = 1.5,
-        rwd_termination_penalty: float = -100.0,
-        rwd_position: float = 1.0,
-        rwd_orientation: float = 0.2,
-        rwd_linear_velocity: float = 0.0,
-        rwd_angular_velocity: float = 0.0,
-        rwd_action: float = 0.0,
-        rwd_d_action: float = 1.0,
-        rwd_non_negative: bool = False,
-        # rl-tools termination thresholds
-        term_position: float = 1.0,
-        term_linear_velocity: float = 2.0,
-        term_angular_velocity: float = 35.0,
-        init_guidance: float = 0.1,
-        init_max_position: float = 0.1,
-        init_max_angle: float = np.pi / 2,
-        init_max_linear_velocity: float = 1.0,
-        init_max_angular_velocity: float = 1.0,
+        max_episode_length: int = 1000,
+        dt: float = 0.01,
+        lin_vel_reward_scale: float = -0.05,
+        ang_vel_reward_scale: float = -0.01,
+        distance_to_goal_reward_scale: float = 15.0,
+        orientation_reward_scale: float = 10.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
         use_compile: bool = False,
         compile_mode: str = "max-autotune",
+        **kwargs
     ):
-        # Observations: position_error_world (3) + rotation_matrix (9) +
-        #               velocity_world (3) + angular_velocity (3) + rpm_scaled (4) + last_action (4)
-        obs_dim = 3 + 9 + 3 + 3 + 4 + 4
         self.single_action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32)
+        # Observations: velocity_body (3) + angular_velocity (3) + gravity_body (3) +
+        #               rel_pos_body (3) + orientation_error_axis_angle (3) + rpm_scaled (4) = 19
         self.single_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32
         )
         self.num_envs = num_envs
         self.num_agents = num_envs  # For PufferLib compatibility
         super().__init__()
 
         self.device = torch.device(device)
-        self.dt = sim_dt
-        self.max_episode_length = int(max_episode_length_seconds / (sim_dt * decimation_steps))
+        self.dt = dt
+        self.max_episode_length = max_episode_length
+        self.max_episode_length_s = max_episode_length * dt
+        self.lin_vel_reward_scale = lin_vel_reward_scale
+        self.ang_vel_reward_scale = ang_vel_reward_scale
+        self.distance_to_goal_reward_scale = distance_to_goal_reward_scale
+        self.orientation_reward_scale = orientation_reward_scale
         self.dynamics_randomization_delta = dynamics_randomization_delta
         self.render_mode = render_mode
-
-        # rl-tools Squared reward parameters
-        self.rwd_scale = rwd_scale
-        self.rwd_constant = rwd_constant
-        self.rwd_termination_penalty = rwd_termination_penalty
-        self.rwd_position = rwd_position
-        self.rwd_orientation = rwd_orientation
-        self.rwd_linear_velocity = rwd_linear_velocity
-        self.rwd_angular_velocity = rwd_angular_velocity
-        self.rwd_action = rwd_action
-        self.rwd_d_action = rwd_d_action
-        self.rwd_non_negative = rwd_non_negative
-
-        # rl-tools termination thresholds
-        self.term_position = term_position
-        self.term_linear_velocity = term_linear_velocity
-        self.term_angular_velocity = term_angular_velocity
-
-        # rl-tools initial state randomization
-        self.init_guidance = init_guidance
-        self.init_max_position = init_max_position
-        self.init_max_angle = init_max_angle
-        self.init_max_linear_velocity = init_max_linear_velocity
-        self.init_max_angular_velocity = init_max_angular_velocity
 
         # Initialize rerun logging if rendering in human mode
         if self.render_mode == "human" and HAS_RERUN:
@@ -259,15 +195,22 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Actions and forces
         self._actions = torch.zeros(self.num_envs, 4, device=self.device)
-        self._last_action = torch.zeros(self.num_envs, 4, device=self.device)
         self._rotor_speeds = torch.zeros(self.num_envs, 4, device=self.device)
         self._total_thrust_body = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # Goal position
+        self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # Goal orientation (quaternion, z-axis rotations only)
+        self._desired_quat_w = torch.zeros(self.num_envs, 4, device=self.device)
+        self._desired_quat_w[:, 0] = 1.0  # identity quaternion
 
         # Physics parameters
         self._mass = params['mass']
         self._inertia = torch.tensor(params['inertia_diag'], device=self.device)
         self._inertia_inv = 1.0 / self._inertia
         self._gravity = torch.tensor([0.0, 0.0, -9.81], device=self.device)
+        self._gravity_unit = torch.tensor([0.0, 0.0, -1.0], device=self.device)
 
         self._max_rpm = params['max_measured_rpm']
 
@@ -275,7 +218,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in ["position_cost", "orientation_cost"]
+            for key in ["lin_vel", "ang_vel", "distance_to_goal", "orientation"]
         }
         self._cumulative_rewards = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
@@ -300,7 +243,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._rotor_positions = self._nominal_rotor_positions.unsqueeze(0).repeat(self.num_envs, 1, 1)
         self._rising_delay_constants = self._nominal_rising_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
         self._falling_delay_constants = self._nominal_falling_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
-        self._decimation_steps = decimation_steps
+        self._decimation_steps = 2
 
         # torch.compile setup
         self.use_compile = use_compile
@@ -312,23 +255,24 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             )
             # Warmup: run compiled function on random data to trigger JIT compilation
             _w_actions_0_1 = torch.rand(self.num_envs, 4, device=self.device) * self._max_rpm
-            _w_actions = torch.rand(self.num_envs, 4, device=self.device) * 2 - 1
-            _w_last_action = torch.zeros(self.num_envs, 4, device=self.device)
             _w_rotor_speeds = torch.zeros(self.num_envs, 4, device=self.device)
             _w_position = torch.zeros(self.num_envs, 3, device=self.device)
             _w_velocity = torch.zeros(self.num_envs, 3, device=self.device)
             _w_quaternion = torch.zeros(self.num_envs, 4, device=self.device)
-            _w_quaternion[:, 0] = 1.0  # valid unit quaternion (w=1)
+            _w_quaternion[:, 0] = 1.0
             _w_angular_velocity = torch.zeros(self.num_envs, 3, device=self.device)
+            _w_desired_pos = torch.zeros(self.num_envs, 3, device=self.device)
+            _w_desired_quat = torch.zeros(self.num_envs, 4, device=self.device)
+            _w_desired_quat[:, 0] = 1.0
             self._compiled_physics_step(
                 _w_actions_0_1,
-                _w_actions,
-                _w_last_action,
                 _w_rotor_speeds,
                 _w_position,
                 _w_velocity,
                 _w_quaternion,
                 _w_angular_velocity,
+                _w_desired_pos,
+                _w_desired_quat,
                 self._rotor_positions,
                 self._thrust_directions,
                 self._thrust_coefficients,
@@ -340,21 +284,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
                 self._inertia,
                 self._inertia_inv,
                 self._gravity,
+                self._gravity_unit,
                 self.dt,
                 self._max_rpm,
-                self.rwd_scale,
-                self.rwd_constant,
-                self.rwd_termination_penalty,
-                self.rwd_position,
-                self.rwd_orientation,
-                self.rwd_linear_velocity,
-                self.rwd_angular_velocity,
-                self.rwd_action,
-                self.rwd_d_action,
-                self.rwd_non_negative,
-                self.term_position,
-                self.term_linear_velocity,
-                self.term_angular_velocity,
+                self.lin_vel_reward_scale,
+                self.ang_vel_reward_scale,
+                self.distance_to_goal_reward_scale,
+                self.orientation_reward_scale,
             )
         else:
             self._compiled_physics_step = self._physics_step_impl
@@ -373,16 +309,174 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Process actions and apply physics
         self._actions = actions.clone().clamp(-1.0, 1.0)
         actions_0_1 = self._max_rpm * (self._actions + 1.0) / 2.0
+        for _ in range(self._decimation_steps-1):
+            self._step_once(actions_0_1)
+        return self._step_once(actions_0_1)
 
+    def _physics_step_impl(
+        self,
+        actions_0_1: torch.Tensor,
+        rotor_speeds: torch.Tensor,
+        position: torch.Tensor,
+        velocity: torch.Tensor,
+        quaternion: torch.Tensor,
+        angular_velocity: torch.Tensor,
+        desired_pos_w: torch.Tensor,
+        desired_quat_w: torch.Tensor,
+        rotor_positions: torch.Tensor,
+        thrust_directions: torch.Tensor,
+        thrust_coefficients: torch.Tensor,
+        rotor_torque_constants: torch.Tensor,
+        rotor_torque_directions: torch.Tensor,
+        rising_delay_constants: torch.Tensor,
+        falling_delay_constants: torch.Tensor,
+        mass: float,
+        inertia: torch.Tensor,
+        inertia_inv: torch.Tensor,
+        gravity: torch.Tensor,
+        gravity_unit: torch.Tensor,
+        dt: float,
+        max_rpm: float,
+        lin_vel_reward_scale: float,
+        ang_vel_reward_scale: float,
+        distance_to_goal_reward_scale: float,
+        orientation_reward_scale: float,
+    ):
+        """Pure computation kernel for physics step - compiled by torch.compile."""
+        # Apply motor delay
+        rising_mask = actions_0_1 > rotor_speeds
+        diffs = actions_0_1 - rotor_speeds
+        delay_constants = torch.where(rising_mask, rising_delay_constants, falling_delay_constants)
+        new_rotor_speeds = rotor_speeds + diffs * delay_constants * dt
+
+        # Compute thrust from rotor speeds (quadratic thrust curve)
+        actions_polynomial = torch.stack([
+            torch.ones_like(new_rotor_speeds),
+            new_rotor_speeds,
+            torch.square(new_rotor_speeds)
+        ], dim=-1)  # N x 4 x 3
+        thrust_magnitude = torch.einsum('ijk,ijk->ij', actions_polynomial, thrust_coefficients)  # N x 4
+        rotor_thrust = thrust_magnitude[..., None] * thrust_directions
+
+        # Compute torques
+        # Yaw moment (torque in z axis)
+        torque_body = torch.sum(
+            thrust_magnitude[..., None] *
+            rotor_torque_constants[..., None] *
+            rotor_torque_directions,
+            dim=1
+        )
+        # Roll and pitch moment (torque in x and y axis) - vectorized cross product
+        cross_prod = torch.cross(rotor_positions, rotor_thrust, dim=-1).sum(dim=1)
+        torque_body = torque_body + cross_prod
+
+        # Total thrust in body frame
+        total_thrust_body = rotor_thrust.sum(dim=1)
+
+        # Integrate physics
+        # Convert thrust from body to world frame
+        thrust_world = rotate_vector_by_quaternion(total_thrust_body, quaternion)
+
+        # Linear acceleration (F/m + g)
+        linear_acc = thrust_world / mass + gravity
+
+        # Update velocity and position
+        new_velocity = velocity + linear_acc * dt
+        new_position = position + new_velocity * dt
+
+        # Angular acceleration (I^-1 * (tau - omega x (I * omega)))
+        I_omega = inertia * angular_velocity
+        gyroscopic = torch.cross(angular_velocity, I_omega, dim=-1)
+        angular_acc = inertia_inv * (torque_body - gyroscopic)
+
+        # Update angular velocity
+        new_angular_velocity = torch.clamp(angular_velocity + angular_acc * dt, -1e12, 1e12)
+
+        # Update quaternion
+        # dq/dt = 0.5 * q * omega_quat
+        omega_quat = torch.cat([
+            torch.zeros_like(new_angular_velocity[..., :1]),
+            new_angular_velocity
+        ], dim=-1)
+        q_dot = 0.5 * quaternion_multiply(quaternion, omega_quat)
+        new_quaternion = quaternion + q_dot * dt
+
+        # Normalize quaternion
+        new_quaternion = new_quaternion / torch.norm(new_quaternion, dim=-1, keepdim=True)
+
+        # Compute observations
+        velocity_body = rotate_vector_by_quaternion_conj(new_velocity, new_quaternion)
+        gravity_body = rotate_vector_by_quaternion_conj(gravity_unit.unsqueeze(0).expand(new_position.shape[0], -1), new_quaternion)
+        rel_pos_world = desired_pos_w - new_position
+        rel_pos_body = rotate_vector_by_quaternion_conj(rel_pos_world, new_quaternion)
+        rpm_scaled = new_rotor_speeds / max_rpm
+        orientation_error = quaternion_error_axis_angle(new_quaternion, desired_quat_w)
+
+        observations = torch.cat([
+            velocity_body,           # 3
+            new_angular_velocity,    # 3
+            gravity_body,            # 3
+            rel_pos_body,            # 3
+            orientation_error,       # 3
+            rpm_scaled               # 4
+        ], dim=-1)
+
+        # Compute rewards
+        lin_vel = torch.sum(torch.square(velocity_body), dim=1)
+        ang_vel = torch.sum(torch.square(new_angular_velocity), dim=1)
+        distance_to_goal = torch.linalg.norm(desired_pos_w - new_position, dim=1)
+        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
+        orientation_reward_mapped = 1 - torch.tanh(orientation_error_magnitude / 0.5)
+
+        rewards = (
+            lin_vel * lin_vel_reward_scale * dt +
+            ang_vel * ang_vel_reward_scale * dt +
+            distance_to_goal_mapped * distance_to_goal_reward_scale * dt +
+            orientation_reward_mapped * orientation_reward_scale * dt
+        )
+
+        # Reward components for logging (unscaled)
+        reward_components = torch.stack([
+            lin_vel * dt,
+            ang_vel * dt,
+            distance_to_goal_mapped * dt,
+            orientation_reward_mapped * dt,
+        ], dim=-1)
+
+        # Check for termination
+        died = (new_position[:, 2] < 0.1) | (new_position[:, 2] > 2.0)
+
+        return (
+            new_rotor_speeds,
+            new_position,
+            new_velocity,
+            new_quaternion,
+            new_angular_velocity,
+            total_thrust_body,
+            observations,
+            rewards,
+            reward_components,
+            died,
+        )
+
+    def _step_once(self, actions_0_1: torch.Tensor):
+        if self.use_compile:
         # Clone state tensors to break CUDAGraph output-buffer aliasing
-        rotor_speeds = self._rotor_speeds.clone()
-        position = self._position.clone()
-        velocity = self._velocity.clone()
-        quaternion = self._quaternion.clone()
-        angular_velocity = self._angular_velocity.clone()
+            rotor_speeds = self._rotor_speeds.clone()
+            position = self._position.clone()
+            velocity = self._velocity.clone()
+            quaternion = self._quaternion.clone()
+            angular_velocity = self._angular_velocity.clone()
+            # Call compiled physics kernel
+            torch.compiler.cudagraph_mark_step_begin()
+        else:
+            rotor_speeds = self._rotor_speeds
+            position = self._position
+            velocity = self._velocity
+            quaternion = self._quaternion
+            angular_velocity = self._angular_velocity
 
-        # Call compiled physics kernel
-        torch.compiler.cudagraph_mark_step_begin()
         (
             self._rotor_speeds,
             self._position,
@@ -392,17 +486,17 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._total_thrust_body,
             self.observations,
             self.rewards,
-            reward_components_for_logging,
-            died,
+            reward_components,
+            self.terminals,
         ) = self._compiled_physics_step(
             actions_0_1,
-            self._actions,
-            self._last_action,
             rotor_speeds,
             position,
             velocity,
             quaternion,
             angular_velocity,
+            self._desired_pos_w,
+            self._desired_quat_w,
             self._rotor_positions,
             self._thrust_directions,
             self._thrust_coefficients,
@@ -414,44 +508,32 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self._inertia,
             self._inertia_inv,
             self._gravity,
+            self._gravity_unit,
             self.dt,
             self._max_rpm,
-            self.rwd_scale,
-            self.rwd_constant,
-            self.rwd_termination_penalty,
-            self.rwd_position,
-            self.rwd_orientation,
-            self.rwd_linear_velocity,
-            self.rwd_angular_velocity,
-            self.rwd_action,
-            self.rwd_d_action,
-            self.rwd_non_negative,
-            self.term_position,
-            self.term_linear_velocity,
-            self.term_angular_velocity,
+            self.lin_vel_reward_scale,
+            self.ang_vel_reward_scale,
+            self.distance_to_goal_reward_scale,
+            self.orientation_reward_scale,
         )
-
-        # Update last action for next step's d_action computation
-        self._last_action = self._actions.clone()
 
         # Build rewards dict for logging (outside compiled region)
         rewards_dict = {
-            "position_cost": reward_components_for_logging[:, 0],
-            "orientation_cost": reward_components_for_logging[:, 1],
+            "lin_vel": reward_components[:, 0],
+            "ang_vel": reward_components[:, 1],
+            "distance_to_goal": reward_components[:, 2],
+            "orientation": reward_components[:, 3],
         }
 
         # Update episode sums for logging
         for key, value in rewards_dict.items():
             self._episode_sums[key] += value
 
-        # Termination
-        self.terminals = died
-
-        # Check for truncation (timeout)
-        self.truncations = self.episode_length_buf >= self.max_episode_length - 1
-
         # Accumulate rewards for episode tracking
         self._cumulative_rewards += self.rewards
+
+        # Check for truncation (timeout) - terminals already computed in kernel
+        self.truncations = self.episode_length_buf >= self.max_episode_length - 1
 
         # Update episode length
         self.episode_length_buf += 1
@@ -489,221 +571,33 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         return (self.observations, self.rewards, self.terminals,
             self.truncations, self.infos)
 
-    def _physics_step_impl(
-        self,
-        actions_0_1: torch.Tensor,
-        actions_clamped: torch.Tensor,
-        last_action: torch.Tensor,
-        rotor_speeds: torch.Tensor,
-        position: torch.Tensor,
-        velocity: torch.Tensor,
-        quaternion: torch.Tensor,
-        angular_velocity: torch.Tensor,
-        rotor_positions: torch.Tensor,
-        thrust_directions: torch.Tensor,
-        thrust_coefficients: torch.Tensor,
-        rotor_torque_constants: torch.Tensor,
-        rotor_torque_directions: torch.Tensor,
-        rising_delay_constants: torch.Tensor,
-        falling_delay_constants: torch.Tensor,
-        mass: float,
-        inertia: torch.Tensor,
-        inertia_inv: torch.Tensor,
-        gravity: torch.Tensor,
-        dt: float,
-        max_rpm: float,
-        rwd_scale: float,
-        rwd_constant: float,
-        rwd_termination_penalty: float,
-        rwd_position: float,
-        rwd_orientation: float,
-        rwd_linear_velocity: float,
-        rwd_angular_velocity: float,
-        rwd_action: float,
-        rwd_d_action: float,
-        rwd_non_negative: bool,
-        term_position: float,
-        term_linear_velocity: float,
-        term_angular_velocity: float,
-    ):
-        """Pure computation kernel - decimation loop + obs/reward in one compilable function."""
-        # Apply motor delay
-        rising_mask = actions_0_1 > rotor_speeds
-        diffs = actions_0_1 - rotor_speeds
-        delay_constants = torch.where(rising_mask, rising_delay_constants, falling_delay_constants)
-        rotor_speeds_next = rotor_speeds + diffs * delay_constants * dt
-
-        # Compute thrust from rotor speeds (quadratic thrust curve)
-        actions_polynomial = torch.stack([
-            torch.ones_like(rotor_speeds_next),
-            rotor_speeds_next,
-            torch.square(rotor_speeds_next)
-        ], dim=-1)  # N x 4 x 3
-        thrust_magnitude = torch.einsum('ijk,ijk->ij', actions_polynomial, thrust_coefficients)  # N x 4
-        rotor_thrust = thrust_magnitude[..., None] * thrust_directions
-
-        # Compute torques
-        torque_body_from_yaw = torch.sum(
-            thrust_magnitude[..., None] *
-            rotor_torque_constants[..., None] *
-            rotor_torque_directions,
-            dim=1
-        )
-        cross_prod = torch.cross(rotor_positions, rotor_thrust, dim=-1).sum(dim=1)
-        torque_body = torque_body_from_yaw + cross_prod
-
-        # Total thrust in body frame
-        total_thrust_body = rotor_thrust.sum(dim=1)
-
-        # Convert thrust from body to world frame
-        thrust_world = rotate_vector_by_quaternion(total_thrust_body, quaternion)
-
-        # Linear acceleration (F/m + g)
-        linear_acc = thrust_world / mass + gravity
-
-        # Update velocity and position
-        velocity_next = velocity + linear_acc * dt
-        position_next = position + velocity_next * dt
-
-        # Angular acceleration (I^-1 * (tau - omega x (I * omega)))
-        I_omega = inertia * angular_velocity
-        gyroscopic = torch.cross(angular_velocity, I_omega, dim=-1)
-        angular_acc = inertia_inv * (torque_body - gyroscopic)
-
-        # Update angular velocity
-        angular_velocity_next = torch.clamp(angular_velocity + angular_acc * dt, -1e12, 1e12)
-
-        # Update quaternion: dq/dt = 0.5 * q * omega_quat
-        omega_quat = torch.cat([
-            torch.zeros_like(angular_velocity_next[..., :1]),
-            angular_velocity_next
-        ], dim=-1)
-        q_dot = 0.5 * quaternion_multiply(quaternion, omega_quat)
-        quaternion_next = quaternion + q_dot * dt
-        quaternion_next = quaternion_next / torch.norm(quaternion_next, dim=-1, keepdim=True)
-
-        # --- Observations (rl-tools DefaultActionHistoryObservation) ---
-
-        # 1. TrajectoryTrackingPosition: position - desired_position (world frame, 3)
-        position_error = position_next
-
-        # 2. OrientationRotationMatrix: flattened 3x3 rotation matrix (9)
-        w, x, y, z = quaternion_next[:, 0], quaternion_next[:, 1], quaternion_next[:, 2], quaternion_next[:, 3]
-        rot_matrix = torch.stack([
-            1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y),
-            2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x),
-            2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y),
-        ], dim=-1)  # (N, 9)
-
-        # 3. TrajectoryTrackingLinearVelocity: velocity - desired_velocity (world frame, 3)
-        # desired_velocity is 0 for hover tasks
-        velocity_error = velocity_next
-
-        # 4. AngularVelocity (3)
-        # angular_velocity is already in body frame
-
-        # 5. RPM scaled (4)
-        rpm_scaled = rotor_speeds_next / max_rpm
-
-        observations = torch.cat([
-            position_error,       # 3
-            rot_matrix,           # 9
-            velocity_error,       # 3
-            angular_velocity_next,     # 3
-            rpm_scaled,           # 4
-            last_action
-        ], dim=-1)
-
-        # --- Reward (rl-tools Squared) ---
-
-        # Position cost: ||position - desired_position||
-        position_cost = torch.linalg.norm(position_error, dim=1)
-
-        # Orientation cost: 2 * acos(1 - |q_z|)
-        # Matches rl-tools: components.orientation_cost = 2*acos(1-abs(state.orientation[3]))
-        orientation_cost = torch.acos(1.0 - torch.abs(quaternion_next[:, 3]))
-
-        # # d_action cost: ||action - last_action||
-        d_action = actions_clamped - last_action
-        d_action_cost = torch.linalg.norm(d_action, dim=1)
-
-        # Weighted cost
-        weighted_cost = (
-            rwd_position * position_cost +
-            rwd_orientation * orientation_cost +
-            rwd_d_action * d_action_cost
-        )
-
-        # --- Termination (rl-tools style: per-axis thresholds) ---
-        pos_err_abs = torch.abs(position_error)
-        vel_abs = torch.abs(velocity_next)
-        ang_vel_abs = torch.abs(angular_velocity_next)
-        died = (
-            (pos_err_abs[:, 0] > term_position) |
-            (pos_err_abs[:, 1] > term_position) |
-            (pos_err_abs[:, 2] > term_position) |
-            (vel_abs[:, 0] > term_linear_velocity) |
-            (vel_abs[:, 1] > term_linear_velocity) |
-            (vel_abs[:, 2] > term_linear_velocity) |
-            (ang_vel_abs[:, 0] > term_angular_velocity) |
-            (ang_vel_abs[:, 1] > term_angular_velocity) |
-            (ang_vel_abs[:, 2] > term_angular_velocity)
-        )
-
-        # Reward: -scale * weighted_cost + constant, with termination penalty
-        scaled_weighted_cost = rwd_scale * weighted_cost
-        rewards = -scaled_weighted_cost + rwd_constant
-        rewards = torch.where(died, torch.full_like(rewards, rwd_termination_penalty), rewards)
-
-        reward_components_for_logging = torch.stack([
-            position_cost,
-            orientation_cost,
-        ], dim=-1)
-
-        return (
-            rotor_speeds_next,
-            position_next,
-            velocity_next,
-            quaternion_next,
-            angular_velocity_next,
-            total_thrust_body,
-            observations,
-            rewards,
-            reward_components_for_logging,
-            died,
-        )
-
     def _get_observations(self) -> torch.Tensor:
-        """Compute observations for all environments (used at reset)."""
-        # 1. Position error (world frame)
-        position_error = self._position
+        """Compute observations for all environments."""
+        velocity_body = rotate_vector_by_quaternion_conj(self._velocity, self._quaternion)
 
-        # 2. Rotation matrix (flattened)
-        q = self._quaternion
-        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-        rot_matrix = torch.stack([
-            1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y),
-            2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x),
-            2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y),
-        ], dim=-1)
+        # Project gravity to body frame
+        gravity_body = rotate_vector_by_quaternion_conj(self._gravity_unit.unsqueeze(0).expand(self.num_envs, -1), self._quaternion)
 
-        # 3. Velocity error (world frame, desired velocity = 0)
-        velocity_error = self._velocity
+        # Transform desired position to body frame (relative position)
+        rel_pos_world = self._desired_pos_w - self._position
+        rel_pos_body = rotate_vector_by_quaternion_conj(rel_pos_world, self._quaternion)
 
-        # 4. Angular velocity
-        angular_velocity = self._angular_velocity
-
-        # 5. RPM scaled
         rpm_scaled = self._rotor_speeds / self._max_rpm
 
+        # Compute orientation error as axis-angle (in body frame)
+        orientation_error = quaternion_error_axis_angle(self._quaternion, self._desired_quat_w)
+
         obs = torch.cat([
-            position_error,       # 3
-            rot_matrix,           # 9
-            velocity_error,       # 3
-            angular_velocity,     # 3
-            rpm_scaled,           # 4
-            self._last_action
+            velocity_body,           # 3
+            self._angular_velocity,  # 3
+            gravity_body,            # 3
+            rel_pos_body,            # 3
+            orientation_error,       # 3
+            rpm_scaled               # 4
         ], dim=-1)
+
+        assert not torch.isnan(obs).any()
+        assert not torch.isinf(obs).any()
 
         return obs
 
@@ -725,15 +619,11 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         if len(env_ids) == 0:
             return
 
-        num_reset = len(env_ids)
-
         # Reset episode tracking
         self.episode_length_buf[env_ids] = 0
         self._actions[env_ids] = 0.0
-        self._last_action[env_ids] = 0.0
         self._rotor_speeds[env_ids] = 0.0
         self._cumulative_rewards[env_ids] = 0.0
-
 
         # Reset episode sums
         for key in self._episode_sums.keys():
@@ -741,6 +631,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
 
         # Randomize dynamics parameters for reset environments
         delta = self.dynamics_randomization_delta
+        num_reset = len(env_ids)
 
         if delta > 0:
             # Generate random multipliers: (1 +- delta)
@@ -760,51 +651,19 @@ class QuadcopterEnv(pufferlib.PufferEnv):
                 1.0 + torch.zeros((num_reset, *self._nominal_falling_delay_constants.shape), device=self.device).uniform_(-delta, delta)
             )
 
-        # rl-tools style initial state sampling (init_90_deg)
-        # Guided vs random initialization
-        guidance_mask = torch.zeros(num_reset, device=self.device).uniform_(0, 1) < self.init_guidance
+        # Sample new goal positions
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
 
-        # Position: guided -> at desired position, random -> desired + uniform offset
-        pos_offset = torch.zeros(num_reset, 3, device=self.device).uniform_(
-            -self.init_max_position, self.init_max_position
-        )
-        self._position[env_ids] = torch.where(
-            guidance_mask.unsqueeze(1).expand(-1, 3),
-            torch.zeros_like(pos_offset),
-            pos_offset,
-        )
+        # Sample new goal orientations (z-axis rotations only)
+        yaw_angles = torch.zeros(len(env_ids), device=self.device).uniform_(-np.pi, np.pi)
+        self._desired_quat_w[env_ids] = quaternion_from_z_rotation(yaw_angles)
 
-        # Orientation: guided -> identity, random -> random up to init_max_angle
-        if self.init_max_angle > 0:
-            random_quats = sample_random_orientation(num_reset, self.init_max_angle, self.device)
-            identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(num_reset, -1)
-            self._quaternion[env_ids] = torch.where(
-                guidance_mask.unsqueeze(1).expand(-1, 4),
-                identity_quat,
-                random_quats,
-            )
-        else:
-            self._quaternion[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
-
-        # Velocity: guided -> 0, random -> uniform
-        random_vel = torch.zeros(num_reset, 3, device=self.device).uniform_(
-            -self.init_max_linear_velocity, self.init_max_linear_velocity
-        )
-        self._velocity[env_ids] = torch.where(
-            guidance_mask.unsqueeze(1).expand(-1, 3),
-            torch.zeros_like(random_vel),
-            random_vel,
-        )
-
-        # Angular velocity: guided -> 0, random -> uniform
-        random_ang_vel = torch.zeros(num_reset, 3, device=self.device).uniform_(
-            -self.init_max_angular_velocity, self.init_max_angular_velocity
-        )
-        self._angular_velocity[env_ids] = torch.where(
-            guidance_mask.unsqueeze(1).expand(-1, 3),
-            torch.zeros_like(random_ang_vel),
-            random_ang_vel,
-        )
+        # Reset quadcopter state to origin with identity orientation
+        self._position[env_ids] = torch.tensor([0.0, 0.0, 1.0], device=self.device)
+        self._velocity[env_ids] = 0.0
+        self._quaternion[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        self._angular_velocity[env_ids] = 0.0
 
     def _render(self):
         """Render the environment using rerun logging."""
@@ -852,8 +711,10 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rr.log("velocity_world_m_s/z", rr.Scalars(float(velocity_world[2])))
 
         # Log goal position with goal orientation
-        goal_position = np.zeros(3)
-        goal_quat_xyzw = np.array([0,0,0,1])
+        goal_position = self._desired_pos_w[0].detach().cpu().numpy()
+        goal_quaternion = self._desired_quat_w[0].detach().cpu().numpy()
+        goal_quat_xyzw = np.array([goal_quaternion[1], goal_quaternion[2],
+                                   goal_quaternion[3], goal_quaternion[0]])
         rr.log(
             "goal",
             rr.Transform3D(

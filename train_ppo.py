@@ -99,6 +99,11 @@ def train(args, wandb_group=None):
     vecenv = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
+        max_episode_length=args.max_episode_length,
+        dt=args.dt,
+        lin_vel_reward_scale=args.lin_vel_reward_scale,
+        ang_vel_reward_scale=args.ang_vel_reward_scale,
+        distance_to_goal_reward_scale=args.distance_to_goal_reward_scale,
         dynamics_randomization_delta=args.dynamics_randomization_delta,
         device=args.device,
         use_compile=True
@@ -128,25 +133,30 @@ def train(args, wandb_group=None):
     # Sampling and batch parameters (matching SKRL config)
     # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
-    rollouts_multiplier = 128
-    train_config['batch_size'] = args.num_envs * rollouts_multiplier
+    rollouts_multiplier = 32
+    train_config['batch_size'] = args.num_envs * rollouts_multiplier  # SKRL rollouts=rollouts_multiplier
     train_config['bptt_horizon'] = 'auto'
-    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)//8
 
-    # PPO hyperparameters from CLI args
-    train_config['update_epochs'] = args.update_epochs
-    train_config['gamma'] = args.gamma
-    train_config['gae_lambda'] = args.gae_lambda
-    train_config['clip_coef'] = args.clip_coef
-    train_config['vf_clip_coef'] = 0.2
-    train_config['vf_coef'] = args.vf_coef
-    train_config['ent_coef'] = args.ent_coef
-    train_config['max_grad_norm'] = 1.0
+    # SKRL: learning_epochs=8
+    train_config['update_epochs'] = 8
 
-    # Optimizer
+    # SKRL: mini_batches=8, so minibatch_size = batch_size / 8
+    # With num_envs=4096, batch=131072, minibatch=16384
+    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
+
+    # PPO hyperparameters (matching SKRL config)
+    train_config['gamma'] = 0.99              # SKRL: discount_factor
+    train_config['gae_lambda'] = 0.95         # SKRL: lambda
+    train_config['clip_coef'] = 0.2           # SKRL: ratio_clip
+    train_config['vf_clip_coef'] = 0.2        # SKRL: value_clip
+    train_config['vf_coef'] = 2.0             # SKRL: value_loss_scale
+    train_config['ent_coef'] = 0.0            # SKRL: entropy_loss_scale
+    train_config['max_grad_norm'] = 1.0       # SKRL: grad_norm_clip
+
+    # Optimizer (SKRL uses Adam with lr=5e-4)
     train_config['optimizer'] = 'muon'
-    train_config['learning_rate'] = args.learning_rate
-    train_config['anneal_lr'] = True
+    train_config['learning_rate'] = 5.0e-04   # SKRL: learning_rate
+    train_config['anneal_lr'] = True          # SKRL uses KLAdaptiveLR, we use cosine
 
     # Initialize wandb early to get run ID for log directory
     logger = None
@@ -281,29 +291,23 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=8192, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=2048, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.1, help="Dynamics randomization range")
+    parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
+    parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
+    parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.2, help="Dynamics randomization range")
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
 
-    # PPO hyperparameters
-    parser.add_argument("--learning-rate", type=float, default=5.0e-04, help="Learning rate")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--gae-lambda", type=float, default=0.98, help="GAE lambda")
-    parser.add_argument("--clip-coef", type=float, default=0.1, help="PPO clip coefficient")
-    parser.add_argument("--vf-coef", type=float, default=0.5, help="Value function loss coefficient")
-    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy loss coefficient")
-    parser.add_argument("--update-epochs", type=int, default=4, help="PPO update epochs per rollout")
-
     # Logging and checkpointing
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases logging")
-    parser.add_argument("--wandb-project", type=str, default="puffer-raptor", help="W&B project name")
+    parser.add_argument("--wandb-project", type=str, default="puffer_raptor", help="W&B project name")
     parser.add_argument("--print-interval", type=int, default=10000, help="Print stats interval")
     parser.add_argument("--checkpoint-interval", type=int, default=100000, help="Checkpoint save interval (0 to disable)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint .pt file to resume from")
