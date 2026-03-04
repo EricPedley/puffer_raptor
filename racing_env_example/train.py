@@ -10,7 +10,7 @@ import numpy as np
 # custom imports
 from quad_race_env import *
 from randomization import *
-from cyclone.shared.gate_maps import (
+from gate_maps import (
     gate_positions as hard_pos,
     gate_yaws as hard_yaw,
     racetrack_start as hard_start,

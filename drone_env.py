@@ -11,12 +11,9 @@ import pufferlib
 
 from line_profiler import profile
 
-try:
-    import rerun as rr
-    from logging_utils import log_drone_pose
-    HAS_RERUN = True
-except ImportError:
-    HAS_RERUN = False
+import rerun as rr
+from .logging_utils import log_drone_pose
+HAS_RERUN = True
 
 def quaternion_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     """Multiply two quaternions (w, x, y, z format)."""
@@ -148,6 +145,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         distance_to_goal_reward_scale: float = 17.0,
         orientation_reward_scale: float = 10.0,
         dynamics_randomization_delta: float = 0.0,
+        autoreset: bool = True,
+        discretize_obs: bool = False,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         render_mode: Optional[str] = None,
         use_compile: bool = False,
@@ -173,6 +172,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.distance_to_goal_reward_scale = distance_to_goal_reward_scale
         self.orientation_reward_scale = orientation_reward_scale
         self.dynamics_randomization_delta = dynamics_randomization_delta
+        self.autoreset = autoreset
+        self.discretize_obs = discretize_obs
         self.render_mode = render_mode
 
         # Initialize rerun logging if rendering in human mode
@@ -290,6 +291,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
                 self.ang_vel_reward_scale,
                 self.distance_to_goal_reward_scale,
                 self.orientation_reward_scale,
+                self.discretize_obs,
             )
         else:
             self._compiled_physics_step = self._physics_step_impl
@@ -338,6 +340,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         ang_vel_reward_scale: float,
         distance_to_goal_reward_scale: float,
         orientation_reward_scale: float,
+        discretize_obs: bool,
     ):
         """Pure computation kernel for physics step - compiled by torch.compile."""
         # Apply motor delay
@@ -408,6 +411,12 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         rel_pos_body = rotate_vector_by_quaternion_conj(rel_pos_world, new_quaternion)
         rpm_scaled = new_rotor_speeds / max_rpm
         orientation_error = quaternion_error_axis_angle(new_quaternion, desired_quat_w)
+
+        if discretize_obs:
+            velocity_body = torch.round(torch.clamp(velocity_body, -1.0, 1.0) * 1000.0) / 1000.0
+            gravity_body = torch.round(torch.clamp(gravity_body, -1.0, 1.0) * 1000.0) / 1000.0
+            rel_pos_body = torch.round(torch.clamp(rel_pos_body, -1.0, 1.0) * 1000.0) / 1000.0
+            orientation_error = torch.round(torch.clamp(orientation_error, -1.0, 1.0) * 1000.0) / 1000.0
 
         observations = torch.cat([
             velocity_body,           # 3
@@ -514,6 +523,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             self.ang_vel_reward_scale,
             self.distance_to_goal_reward_scale,
             self.orientation_reward_scale,
+            self.discretize_obs,
         )
 
         # Build rewards dict for logging (outside compiled region)
@@ -538,12 +548,13 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self.episode_length_buf += 1
 
         # Handle resets
-        reset_envs = torch.where(self.terminals | self.truncations)[0]
-        if len(reset_envs) > 0:
-            # Store completed episode stats before resetting
-            self._completed_episode_lengths[reset_envs] = self.episode_length_buf[reset_envs].float()
-            self._completed_episode_rewards[reset_envs] = self._cumulative_rewards[reset_envs]
-            self._reset_idx(reset_envs)
+        if self.autoreset:
+            reset_envs = torch.where(self.terminals | self.truncations)[0]
+            if len(reset_envs) > 0:
+                # Store completed episode stats before resetting
+                self._completed_episode_lengths[reset_envs] = self.episode_length_buf[reset_envs].float()
+                self._completed_episode_rewards[reset_envs] = self._cumulative_rewards[reset_envs]
+                self._reset_idx(reset_envs)
 
         # Render if human mode is enabled
         if self.render_mode == "human" and HAS_RERUN:
