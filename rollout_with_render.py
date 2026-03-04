@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load the latest checkpoint from train_ppo.py and run a rollout with rendering."""
+"""Load a checkpoint or the Raptor foundation policy and run a rollout with rendering."""
 
 import argparse
 import glob
@@ -10,6 +10,7 @@ from pathlib import Path
 from drone_env import QuadcopterEnv
 from train_ppo import Policy
 from train_sac import Actor
+import foundation_policy
 
 
 def find_latest_checkpoint(exp_name: str = "quadcopter_ppo") -> str:
@@ -48,8 +49,8 @@ def load_policy(checkpoint_path: str, env: QuadcopterEnv, hidden_size: int, devi
     return policy, is_sac, global_step
 
 
-def get_action(policy: torch.nn.Module, obs: torch.Tensor, is_sac: bool) -> torch.Tensor:
-    """Get deterministic action from either policy type."""
+def get_action_torch(policy: torch.nn.Module, obs: torch.Tensor, is_sac: bool) -> torch.Tensor:
+    """Get deterministic action from a torch policy (PPO or SAC)."""
     if is_sac:
         _, _, mean = policy.get_action(obs)
         return mean
@@ -58,16 +59,68 @@ def get_action(policy: torch.nn.Module, obs: torch.Tensor, is_sac: bool) -> torc
         return action_dist.mean
 
 
+def build_raptor_obs(env: QuadcopterEnv) -> torch.Tensor:
+    """Build 22D rl-tools observation from the env's internal state.
+
+    Raptor expects: pos_error_world (3) + rotation_matrix (9) +
+                    velocity_world (3) + angular_velocity_body (3) + last_action (4) = 22
+
+    The env's 19D obs uses body-frame quantities that can't be inverted,
+    so we read directly from the env's state tensors.
+    """
+    # Position error (world frame)
+    position_error = env._position - env._desired_pos_w
+
+    # Rotation matrix from quaternion (flattened 3x3)
+    q = env._quaternion
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    rot_matrix = torch.stack([
+        1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y),
+        2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x),
+        2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y),
+    ], dim=-1)
+
+    # Velocity (world frame)
+    velocity = env._velocity
+
+    # Angular velocity (body frame)
+    angular_velocity = env._angular_velocity
+
+    # Last action (clamped [-1, 1])
+    last_action = env._actions
+
+    return torch.cat([
+        position_error,       # 3
+        rot_matrix,           # 9
+        velocity,             # 3
+        angular_velocity,     # 3
+        last_action,          # 4
+    ], dim=-1)
+
+
+def get_action_raptor(raptor_model, env: QuadcopterEnv) -> torch.Tensor:
+    """Get action from the Raptor foundation policy.
+
+    Builds the 22D rl-tools obs from env state, runs through the numpy-based
+    GRU model via evaluate_step, and returns a torch tensor.
+    """
+    obs_22d = build_raptor_obs(env)
+    obs_np = obs_22d.cpu().numpy()
+    actions_np = raptor_model.evaluate_step(obs_np)
+    return torch.tensor(actions_np, dtype=obs_22d.dtype, device=obs_22d.device)
+
+
 def run_rollout(
-    policy: torch.nn.Module,
+    policy,
     env: QuadcopterEnv,
-    is_sac: bool,
+    is_raptor: bool,
+    is_sac: bool = False,
     num_episodes: int = 1,
-    max_steps: int = None,
     device: str = "cuda",
 ):
     """Run a rollout with the given policy."""
-    policy.eval()
+    if not is_raptor:
+        policy.eval()
 
     total_reward = 0.0
     episode_count = 0
@@ -75,15 +128,22 @@ def run_rollout(
     print(f"Running {num_episodes} rollout episodes with rendering...")
 
     obs, _ = env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32, device=device)
+    if not isinstance(obs, torch.Tensor):
+        obs = torch.tensor(obs, dtype=torch.float32, device=device)
+    if is_raptor:
+        policy.reset()
 
     with torch.no_grad():
         while True:
-            actions = get_action(policy, obs, is_sac)
+            if is_raptor:
+                actions = get_action_raptor(policy, env)
+            else:
+                actions = get_action_torch(policy, obs, is_sac)
 
             # Step environment
             obs, rewards, terminals, truncations, infos = env.step(actions)
-            obs = torch.tensor(obs, dtype=torch.float32, device=device)
+            if not isinstance(obs, torch.Tensor):
+                obs = torch.tensor(obs, dtype=torch.float32, device=device)
 
             total_reward += rewards.sum().item()
 
@@ -93,9 +153,11 @@ def run_rollout(
                 episode_count += 1
                 if episode_count >= num_episodes:
                     break
-                # Reset only the done environments
                 obs, _ = env.reset()
-                obs = torch.tensor(obs, dtype=torch.float32, device=device)
+                if not isinstance(obs, torch.Tensor):
+                    obs = torch.tensor(obs, dtype=torch.float32, device=device)
+                if is_raptor:
+                    policy.reset()
 
     avg_reward = total_reward / max(1, episode_count)
     print(f"\nRollout complete!")
@@ -110,6 +172,7 @@ def main():
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint (auto-find latest if not specified)")
     parser.add_argument("--latest", action="store_true", help="Use model.pt from the most recent logs/ subfolder")
+    parser.add_argument("--raptor", action="store_true", help="Use the Raptor foundation policy instead of a checkpoint")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size of policy")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -122,44 +185,55 @@ def main():
     # Set seed
     torch.manual_seed(args.seed)
 
-    # Find checkpoint
-    if args.latest:
-        logs_dir = Path(__file__).parent / "logs"
-        subdirs = [d for d in logs_dir.iterdir() if d.is_dir()]
-        if not subdirs:
-            raise FileNotFoundError("No subdirectories found in logs/")
-        latest_dir = max(subdirs, key=lambda d: d.stat().st_mtime)
-        checkpoint_path = str(latest_dir / "model.pt")
-    elif args.checkpoint is None:
-        checkpoint_path = find_latest_checkpoint(args.exp_name)
-    else:
-        checkpoint_path = args.checkpoint
-
-    print(f"Loading checkpoint from: {checkpoint_path}")
-
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
     # Create environment with rendering
     env = QuadcopterEnv(
         num_envs=args.num_envs,
         config_path=args.config_path,
         device=args.device,
-        render_mode="human",  # Enable rendering
+        render_mode="human",
     )
 
-    # Load checkpoint (auto-detects PPO vs SAC from keys)
-    policy, is_sac, global_step = load_policy(checkpoint_path, env, args.hidden_size, args.device)
-    print(f"Loaded checkpoint from step {global_step}")
+    if args.raptor:
+        print("Loading Raptor foundation policy...")
+        policy = foundation_policy.Raptor()
+        print(f"Model: {policy.description()}")
+        run_rollout(
+            policy=policy,
+            env=env,
+            is_raptor=True,
+            num_episodes=args.num_episodes,
+            device=args.device,
+        )
+    else:
+        # Find checkpoint
+        if args.latest:
+            logs_dir = Path(__file__).parent / "logs"
+            subdirs = [d for d in logs_dir.iterdir() if d.is_dir()]
+            if not subdirs:
+                raise FileNotFoundError("No subdirectories found in logs/")
+            latest_dir = max(subdirs, key=lambda d: d.stat().st_mtime)
+            checkpoint_path = str(latest_dir / "model.pt")
+        elif args.checkpoint is None:
+            checkpoint_path = find_latest_checkpoint(args.exp_name)
+        else:
+            checkpoint_path = args.checkpoint
 
-    # Run rollout
-    run_rollout(
-        policy=policy,
-        env=env,
-        is_sac=is_sac,
-        num_episodes=args.num_episodes,
-        device=args.device,
-    )
+        print(f"Loading checkpoint from: {checkpoint_path}")
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        policy, is_sac, global_step = load_policy(checkpoint_path, env, args.hidden_size, args.device)
+        print(f"Loaded checkpoint from step {global_step}")
+
+        run_rollout(
+            policy=policy,
+            env=env,
+            is_raptor=False,
+            is_sac=is_sac,
+            num_episodes=args.num_episodes,
+            device=args.device,
+        )
 
     env.close()
     print("Done!")
