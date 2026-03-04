@@ -145,7 +145,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         dt: float = 0.01,
         lin_vel_reward_scale: float = -0.05,
         ang_vel_reward_scale: float = -0.01,
-        distance_to_goal_reward_scale: float = 15.0,
+        distance_to_goal_reward_scale: float = 17.0,
         orientation_reward_scale: float = 10.0,
         dynamics_randomization_delta: float = 0.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -243,7 +243,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         self._rotor_positions = self._nominal_rotor_positions.unsqueeze(0).repeat(self.num_envs, 1, 1)
         self._rising_delay_constants = self._nominal_rising_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
         self._falling_delay_constants = self._nominal_falling_delay_constants.unsqueeze(0).repeat(self.num_envs, 1)
-        self._decimation_steps = 2
 
         # torch.compile setup
         self.use_compile = use_compile
@@ -309,8 +308,6 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         # Process actions and apply physics
         self._actions = actions.clone().clamp(-1.0, 1.0)
         actions_0_1 = self._max_rpm * (self._actions + 1.0) / 2.0
-        for _ in range(self._decimation_steps-1):
-            self._step_once(actions_0_1)
         return self._step_once(actions_0_1)
 
     def _physics_step_impl(
@@ -390,7 +387,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         angular_acc = inertia_inv * (torque_body - gyroscopic)
 
         # Update angular velocity
-        new_angular_velocity = torch.clamp(angular_velocity + angular_acc * dt, -1e12, 1e12)
+        new_angular_velocity = torch.clamp(angular_velocity + angular_acc * dt, -1e2, 1e2)
 
         # Update quaternion
         # dq/dt = 0.5 * q * omega_quat
@@ -429,6 +426,8 @@ class QuadcopterEnv(pufferlib.PufferEnv):
         orientation_error_magnitude = torch.linalg.norm(orientation_error, dim=1)
         orientation_reward_mapped = 1 - torch.tanh(orientation_error_magnitude / 0.5)
 
+        master_scale=0.1
+
         rewards = (
             lin_vel * lin_vel_reward_scale * dt +
             ang_vel * ang_vel_reward_scale * dt +
@@ -455,7 +454,7 @@ class QuadcopterEnv(pufferlib.PufferEnv):
             new_angular_velocity,
             total_thrust_body,
             observations,
-            rewards,
+            master_scale*rewards,
             reward_components,
             died,
         )

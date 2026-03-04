@@ -294,7 +294,7 @@ def main():
     parser.add_argument("--num-envs", type=int, default=2048, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
-    parser.add_argument("--dt", type=float, default=0.01, help="Simulation timestep")
+    parser.add_argument("--dt", type=float, default=0.02, help="Simulation timestep")
     parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
     parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
     parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
