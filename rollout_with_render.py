@@ -8,9 +8,30 @@ import torch
 from pathlib import Path
 
 from drone_env import QuadcopterEnv
-from train_ppo import Policy
+from race_env import QuadcopterRaceEnv
+# from train_ppo import Policy
+from train_race import Policy
 from train_sac import Actor
 import foundation_policy
+
+from racing_env_example.gate_maps import (
+    gate_positions as _hard_pos,
+    gate_yaws as hard_yaw,
+    racetrack_start as _hard_start,
+    positions_with_extr_gate as _easy_pos,
+    yaws_with_extra_gate as easy_yaw,
+    easy_start as _easy_start,
+)
+
+def _zdown_to_zup(pos):
+    p = pos.copy()
+    p[:, 2] = -p[:, 2]
+    return p
+
+easy_pos   = _zdown_to_zup(_easy_pos)
+hard_pos   = _zdown_to_zup(_hard_pos)
+easy_start = _easy_start.copy(); easy_start[2] = -easy_start[2]
+hard_start = _hard_start.copy(); hard_start[2] = -_hard_start[2]
 
 
 def find_latest_checkpoint(exp_name: str = "quadcopter_ppo") -> str:
@@ -44,7 +65,7 @@ def load_policy(checkpoint_path: str, env: QuadcopterEnv, hidden_size: int, devi
     else:
         print("Detected PPO checkpoint")
         policy = Policy(env, hidden_size=hidden_size).to(device)
-    policy.load_state_dict(checkpoint["policy_state_dict"])
+    policy.load_state_dict(checkpoint)
     global_step = checkpoint.get("global_step", 0)
     return policy, is_sac, global_step
 
@@ -174,7 +195,7 @@ def main():
     parser.add_argument("--latest", action="store_true", help="Use model.pt from the most recent logs/ subfolder")
     parser.add_argument("--raptor", action="store_true", help="Use the Raptor foundation policy instead of a checkpoint")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to run")
-    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size of policy")
+    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size of policy")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
@@ -186,14 +207,17 @@ def main():
     torch.manual_seed(args.seed)
 
     # Create environment with rendering
-    env = QuadcopterEnv(
+    env = QuadcopterRaceEnv(
+        gate_positions=easy_pos,
+        gate_yaws =easy_yaw,
+        start_position=easy_start,
         num_envs=args.num_envs,
         config_path=args.config_path,
         device=args.device,
         render_mode="human",
-        dt=1/500,
-        max_episode_length=500*20,
-        discretize_obs=False
+        # dt=1/500,
+        # max_episode_length=500*20,
+        # discretize_obs=False
     )
 
     if args.raptor:

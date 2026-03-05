@@ -12,7 +12,7 @@ import pufferlib
 from line_profiler import profile
 
 import rerun as rr
-from .logging_utils import log_drone_pose
+from logging_utils import log_drone_pose
 HAS_RERUN = True
 
 def quaternion_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
