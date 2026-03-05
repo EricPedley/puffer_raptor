@@ -9,14 +9,14 @@ from typing import Optional, Tuple, Dict
 
 import pufferlib
 
-from .quaternion_utils import (
+from quaternion_utils import (
     quaternion_multiply,
     rotate_vector_by_quaternion,
     rotate_vector_by_quaternion_conj,
     quaternion_error_axis_angle,
     quaternion_from_z_rotation,
 )
-from .logging_utils import log_drone_pose, log_gates
+from logging_utils import log_drone_pose, log_gates
 
 
 class QuadcopterRaceEnv(pufferlib.PufferEnv):
@@ -40,11 +40,11 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
 
     def __init__(
         self,
+        gate_positions: np.ndarray,
+        gate_yaws: np.ndarray,
+        start_position: np.ndarray,
         num_envs: int = 1,
         config_path: str = "my_quad_parameters.json",
-        gate_positions: np.ndarray = None,
-        gate_yaws: np.ndarray = None,
-        start_position: np.ndarray = None,
         gates_ahead: int = 1,
         max_episode_length: int = 5000,
         dt: float = 0.01,
@@ -79,16 +79,11 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         self.autoreset = autoreset
         self.render_mode = render_mode
 
-        if gate_positions is None or gate_yaws is None:
-            raise ValueError("gate_positions and gate_yaws must be provided")
-
         self.num_gates = gate_positions.shape[0]
         self._gate_positions = torch.tensor(gate_positions, dtype=torch.float32, device=self.device)
         self._gate_yaws = torch.tensor(gate_yaws, dtype=torch.float32, device=self.device)
-
-        if start_position is None:
-            start_position = gate_positions[0] - np.array([np.cos(gate_yaws[0]), np.sin(gate_yaws[0]), 0.0])
         self._start_position = torch.tensor(start_position, dtype=torch.float32, device=self.device)
+
 
         # Precompute relative gate info (position/yaw of gate i in gate i-1's frame)
         self._gate_pos_rel = torch.zeros(self.num_gates, 3, dtype=torch.float32, device=self.device)

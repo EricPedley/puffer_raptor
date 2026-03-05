@@ -191,6 +191,9 @@ def main():
         config_path=args.config_path,
         device=args.device,
         render_mode="human",
+        dt=1/500,
+        max_episode_length=500*20,
+        discretize_obs=False
     )
 
     if args.raptor:
