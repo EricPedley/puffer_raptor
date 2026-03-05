@@ -122,7 +122,6 @@ def train(args, wandb_group=None):
         num_envs=args.num_envs,
         config_path=args.config_path,
         device=args.device,
-        use_compile=True
     )
 
     # Create policy

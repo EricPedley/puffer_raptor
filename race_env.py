@@ -136,6 +136,27 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         if self.render_mode == "human":
             rr.init("quadcopter_race_env", spawn=True)
 
+        # torch.compile the physics kernel with all dynamics tensors as explicit args
+        self._compiled_physics_step = torch.compile(
+            self._physics_step_impl,
+            mode="max-autotune",
+            fullgraph=False,
+        )
+        # Warmup to trigger JIT compilation before training begins
+        _w = torch.zeros(self.num_envs, 4, device=self.device)
+        _wq = torch.zeros(self.num_envs, 4, device=self.device); _wq[:, 0] = 1.0
+        self._compiled_physics_step(
+            _w, _w,
+            torch.zeros(self.num_envs, 3, device=self.device),
+            torch.zeros(self.num_envs, 3, device=self.device),
+            _wq,
+            torch.zeros(self.num_envs, 3, device=self.device),
+            self._rotor_positions, self._thrust_directions, self._thrust_coefficients,
+            self._rotor_torque_constants, self._rotor_torque_directions,
+            self._rising_delay_constants, self._falling_delay_constants,
+            self._mass, self._inertia, self._inertia_inv, self._gravity, self.dt,
+        )
+
     def _precompute_relative_gates(self):
         """Compute position/yaw of gate i in gate (i-1)'s reference frame."""
         for i in range(self.num_gates):
@@ -160,13 +181,25 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         velocity: torch.Tensor,
         quaternion: torch.Tensor,
         angular_velocity: torch.Tensor,
+        rotor_positions: torch.Tensor,
+        thrust_directions: torch.Tensor,
+        thrust_coefficients: torch.Tensor,
+        rotor_torque_constants: torch.Tensor,
+        rotor_torque_directions: torch.Tensor,
+        rising_delay_constants: torch.Tensor,
+        falling_delay_constants: torch.Tensor,
+        mass: float,
+        inertia: torch.Tensor,
+        inertia_inv: torch.Tensor,
+        gravity: torch.Tensor,
+        dt: float,
     ):
-        """Pure physics kernel — no observations or rewards."""
+        """Pure physics kernel — all dynamics tensors passed explicitly for torch.compile."""
         # Motor delay
         rising_mask = actions_0_1 > rotor_speeds
         diffs = actions_0_1 - rotor_speeds
-        delay_constants = torch.where(rising_mask, self._rising_delay_constants, self._falling_delay_constants)
-        new_rotor_speeds = rotor_speeds + diffs * delay_constants * self.dt
+        delay_constants = torch.where(rising_mask, rising_delay_constants, falling_delay_constants)
+        new_rotor_speeds = rotor_speeds + diffs * delay_constants * dt
 
         # Thrust (quadratic curve)
         actions_poly = torch.stack([
@@ -174,15 +207,15 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
             new_rotor_speeds,
             torch.square(new_rotor_speeds),
         ], dim=-1)  # (N, 4, 3)
-        thrust_magnitude = torch.einsum('ijk,ijk->ij', actions_poly, self._thrust_coefficients)  # (N, 4)
-        rotor_thrust = thrust_magnitude[..., None] * self._thrust_directions  # (N, 4, 3)
+        thrust_magnitude = torch.einsum('ijk,ijk->ij', actions_poly, thrust_coefficients)  # (N, 4)
+        rotor_thrust = thrust_magnitude[..., None] * thrust_directions  # (N, 4, 3)
 
         # Torques
         torque_body = torch.sum(
-            thrust_magnitude[..., None] * self._rotor_torque_constants[..., None] * self._rotor_torque_directions,
+            thrust_magnitude[..., None] * rotor_torque_constants[..., None] * rotor_torque_directions,
             dim=1,
         )
-        cross_prod = torch.cross(self._rotor_positions, rotor_thrust, dim=-1).sum(dim=1)
+        cross_prod = torch.cross(rotor_positions, rotor_thrust, dim=-1).sum(dim=1)
         torque_body = torque_body + cross_prod
 
         # Total thrust in body frame
@@ -190,17 +223,17 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
 
         # Translate thrust to world frame and compute linear acceleration
         thrust_world = rotate_vector_by_quaternion(total_thrust_body, quaternion)
-        linear_acc = thrust_world / self._mass + self._gravity
+        linear_acc = thrust_world / mass + gravity
 
         # Integrate position and velocity
-        new_velocity = velocity + linear_acc * self.dt
-        new_position = position + new_velocity * self.dt
+        new_velocity = velocity + linear_acc * dt
+        new_position = position + new_velocity * dt
 
         # Angular dynamics
-        I_omega = self._inertia * angular_velocity
+        I_omega = inertia * angular_velocity
         gyroscopic = torch.cross(angular_velocity, I_omega, dim=-1)
-        angular_acc = self._inertia_inv * (torque_body - gyroscopic)
-        new_angular_velocity = torch.clamp(angular_velocity + angular_acc * self.dt, -1e2, 1e2)
+        angular_acc = inertia_inv * (torque_body - gyroscopic)
+        new_angular_velocity = torch.clamp(angular_velocity + angular_acc * dt, -1e2, 1e2)
 
         # Quaternion integration
         omega_quat = torch.cat([
@@ -208,7 +241,7 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
             new_angular_velocity,
         ], dim=-1)
         q_dot = 0.5 * quaternion_multiply(quaternion, omega_quat)
-        new_quaternion = quaternion + q_dot * self.dt
+        new_quaternion = quaternion + q_dot * dt
         new_quaternion = new_quaternion / torch.norm(new_quaternion, dim=-1, keepdim=True)
 
         return new_rotor_speeds, new_position, new_velocity, new_quaternion, new_angular_velocity, total_thrust_body
@@ -316,9 +349,16 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         self._actions = actions.clamp(-1.0, 1.0)
         actions_0_1 = self._max_rpm * (self._actions + 1.0) / 2.0
 
+        # Clone state tensors to break CUDAGraph output-buffer aliasing
         pos_old = self._position.clone()
+        rotor_speeds = self._rotor_speeds.clone()
+        position    = self._position.clone()
+        velocity    = self._velocity.clone()
+        quaternion  = self._quaternion.clone()
+        angular_velocity = self._angular_velocity.clone()
+        torch.compiler.cudagraph_mark_step_begin()
 
-        # Physics step
+        # Physics step (compiled)
         (
             self._rotor_speeds,
             self._position,
@@ -326,13 +366,13 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
             self._quaternion,
             self._angular_velocity,
             _total_thrust_body,
-        ) = self._physics_step_impl(
+        ) = self._compiled_physics_step(
             actions_0_1,
-            self._rotor_speeds,
-            self._position,
-            self._velocity,
-            self._quaternion,
-            self._angular_velocity,
+            rotor_speeds, position, velocity, quaternion, angular_velocity,
+            self._rotor_positions, self._thrust_directions, self._thrust_coefficients,
+            self._rotor_torque_constants, self._rotor_torque_directions,
+            self._rising_delay_constants, self._falling_delay_constants,
+            self._mass, self._inertia, self._inertia_inv, self._gravity, self.dt,
         )
 
         # Gate events
