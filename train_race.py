@@ -159,18 +159,18 @@ def train(args, wandb_group=None):
     train_config['minibatch_size'] = 5000#(args.num_envs * rollouts_multiplier)
 
     # PPO hyperparameters (matching SKRL config)
-    train_config['gamma'] = 0.999              # SKRL: discount_factor
-    train_config['gae_lambda'] = 0.95         # SKRL: lambda
-    train_config['clip_coef'] = 0.2           # SKRL: ratio_clip
-    train_config['vf_clip_coef'] = 0.2        # SKRL: value_clip
-    train_config['vf_coef'] = 2.0             # SKRL: value_loss_scale
-    train_config['ent_coef'] = 0.0            # SKRL: entropy_loss_scale
-    train_config['max_grad_norm'] = 1.0       # SKRL: grad_norm_clip
+    train_config['gamma'] = 0.999             
+    train_config['gae_lambda'] = 0.95        
+    train_config['clip_coef'] = 0.2         
+    train_config['vf_clip_coef'] = 1e5 #basically: no clipping vf
+    train_config['vf_coef'] = 0.5         
+    train_config['ent_coef'] = 0.0       
+    train_config['max_grad_norm'] = 0.5       
 
     # Optimizer (SKRL uses Adam with lr=5e-4)
-    train_config['optimizer'] = 'muon'
-    train_config['learning_rate'] = 5.0e-04   # SKRL: learning_rate
-    train_config['anneal_lr'] = True          # SKRL uses KLAdaptiveLR, we use cosine
+    train_config['optimizer'] = 'adam'
+    train_config['learning_rate'] = 3.0e-04   # SKRL: learning_rate
+    # train_config['anneal_lr'] = True          # SKRL uses KLAdaptiveLR, we use cosine
 
     # Initialize wandb early to get run ID for log directory
     logger = None
@@ -312,7 +312,7 @@ def main():
 
     # Training parameters
     parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size")
-    parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
+    parser.add_argument("--total-timesteps", type=int, default=200_000_000, help="Total training timesteps")
 
     # Logging and checkpointing
     parser.add_argument("--exp-name", type=str, default="quadcopter_ppo", help="Experiment name")
