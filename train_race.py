@@ -19,13 +19,23 @@ from race_env import QuadcopterRaceEnv
 from export import export_weights
 
 from racing_env_example.gate_maps import (
-    gate_positions as hard_pos,
+    gate_positions as _hard_pos,
     gate_yaws as hard_yaw,
-    racetrack_start as hard_start,
-    positions_with_extr_gate as easy_pos,
+    racetrack_start as _hard_start,
+    positions_with_extr_gate as _easy_pos,
     yaws_with_extra_gate as easy_yaw,
-    easy_start,
+    easy_start as _easy_start,
 )
+
+def _zdown_to_zup(pos):
+    p = pos.copy()
+    p[:, 2] = -p[:, 2]
+    return p
+
+easy_pos   = _zdown_to_zup(_easy_pos)
+hard_pos   = _zdown_to_zup(_hard_pos)
+easy_start = _easy_start.copy(); easy_start[2] = -easy_start[2]
+hard_start = _hard_start.copy(); hard_start[2] = -_hard_start[2]
 
 
 def load_pufferlib_config():
