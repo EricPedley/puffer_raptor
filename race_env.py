@@ -12,9 +12,6 @@ import pufferlib
 from quaternion_utils import (
     quaternion_multiply,
     rotate_vector_by_quaternion,
-    rotate_vector_by_quaternion_conj,
-    quaternion_error_axis_angle,
-    quaternion_from_z_rotation,
 )
 from logging_utils import log_drone_pose, log_gates
 
@@ -27,14 +24,13 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
     Coordinate convention: z-up (positive z = up, gravity = [0, 0, -9.81]).
     Gate positions and start_position must be provided in z-up world frame.
 
-    Observation (19 + 4*gates_ahead dims):
+    Observation (16 + 4*gates_ahead dims):
       [0:3]   pos_gate      - position relative to target gate in gate frame
       [3:6]   vel_gate      - velocity in gate frame
-      [6:9]   gravity_body  - gravity unit vector in body frame (encodes tilt)
+      [6:9]   euler_gate    - roll (phi), pitch (theta), yaw relative to gate
       [9:12]  ang_vel       - body-frame angular rates
-      [12:16] rpm_scaled    - rotor speeds / max_rpm
-      [16:19] orient_error  - axis-angle error to gate-aligned upright quaternion
-      [19:]   future_gates  - for each upcoming gate: (rel_x, rel_y, rel_z, rel_yaw)
+      [12:16] rpm_scaled    - rotor speeds normalized to [-1, 1]
+      [16:]   future_gates  - for each upcoming gate: (rel_x, rel_y, rel_z, rel_yaw)
                               in the current gate's reference frame
     """
 
@@ -57,7 +53,7 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         **kwargs,
     ):
-        obs_dim = 19 + 4 * gates_ahead
+        obs_dim = 16 + 4 * gates_ahead
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -96,7 +92,6 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         self._inertia = torch.tensor(params['inertia_diag'], dtype=torch.float32, device=self.device)
         self._inertia_inv = 1.0 / self._inertia
         self._gravity = torch.tensor([0.0, 0.0, -9.81], device=self.device)
-        self._gravity_unit = torch.tensor([0.0, 0.0, -1.0], device=self.device)
         self._max_rpm = params['max_measured_rpm']
 
         # Nominal dynamics tensors
@@ -237,20 +232,18 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
         vel_gate_y = -sin_y * self._velocity[:, 0] + cos_y * self._velocity[:, 1]
         vel_gate = torch.stack([vel_gate_x, vel_gate_y, self._velocity[:, 2]], dim=-1)
 
-        # Gravity unit vector in body frame (encodes full tilt orientation)
-        gravity_body = rotate_vector_by_quaternion_conj(
-            self._gravity_unit.unsqueeze(0).expand(self.num_envs, -1),
-            self._quaternion,
-        )
+        # Euler angles from quaternion (phi, theta) + yaw relative to gate
+        w, x, y, z = (self._quaternion[:, i] for i in range(4))
+        phi   = torch.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
+        theta = torch.asin(torch.clamp(2*(w*y - z*x), -1.0, 1.0))
+        psi   = torch.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+        yaw_rel = (psi - gate_yaw + torch.pi) % (2 * torch.pi) - torch.pi
+        euler_gate = torch.stack([phi, theta, yaw_rel], dim=-1)
 
-        # Orientation error: axis-angle to gate-aligned upright quaternion
-        gate_quat = quaternion_from_z_rotation(gate_yaw)
-        orient_error = quaternion_error_axis_angle(self._quaternion, gate_quat)
+        # Rotor speeds normalized to [-1, 1]  (reference: (w/w_max)*2 - 1)
+        rpm_scaled = self._rotor_speeds / self._max_rpm * 2.0 - 1.0
 
-        # Rotor speeds scaled
-        rpm_scaled = self._rotor_speeds / self._max_rpm
-
-        obs_parts = [pos_gate, vel_gate, gravity_body, self._angular_velocity, rpm_scaled, orient_error]
+        obs_parts = [pos_gate, vel_gate, euler_gate, self._angular_velocity, rpm_scaled]
 
         # Future gate info
         for i in range(self.gates_ahead):
@@ -395,9 +388,9 @@ class QuadcopterRaceEnv(pufferlib.PufferEnv):
 
         info = {
             "mean_reward": self.rewards.mean().item(),
-            "gates_passed": gate_passed.sum().item(),
-            "gate_collisions": gate_collision.sum().item(),
-            "ground_collisions": ground_collision.sum().item(),
+            "gates_passed": gate_passed.float().mean().item(),
+            "gate_collisions": gate_collision.float().mean().item(),
+            "ground_collisions": ground_collision.float().mean().item(),
             "episode_length_mean": self._completed_episode_lengths.mean().item(),
             "episode_reward_mean": self._completed_episode_rewards.mean().item(),
         }

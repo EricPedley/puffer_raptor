@@ -149,19 +149,17 @@ def train(args, wandb_group=None):
     # Sampling and batch parameters (matching SKRL config)
     # SKRL: rollouts=32, so batch_size = num_envs * rollouts
     train_config['total_timesteps'] = args.total_timesteps
-    rollouts_multiplier = 32
-    train_config['batch_size'] = args.num_envs * rollouts_multiplier  # SKRL rollouts=rollouts_multiplier
-    train_config['bptt_horizon'] = 'auto'
+    train_config['batch_size'] = 'auto'  # SKRL rollouts=rollouts_multiplier
+    train_config['bptt_horizon'] = 1000
 
-    # SKRL: learning_epochs=8
-    train_config['update_epochs'] = 8
+    train_config['update_epochs'] = 10
 
     # SKRL: mini_batches=8, so minibatch_size = batch_size / 8
     # With num_envs=4096, batch=131072, minibatch=16384
-    train_config['minibatch_size'] = (args.num_envs * rollouts_multiplier)
+    train_config['minibatch_size'] = 5000#(args.num_envs * rollouts_multiplier)
 
     # PPO hyperparameters (matching SKRL config)
-    train_config['gamma'] = 0.99              # SKRL: discount_factor
+    train_config['gamma'] = 0.999              # SKRL: discount_factor
     train_config['gae_lambda'] = 0.95         # SKRL: lambda
     train_config['clip_coef'] = 0.2           # SKRL: ratio_clip
     train_config['vf_clip_coef'] = 0.2        # SKRL: value_clip
@@ -222,7 +220,7 @@ def train(args, wandb_group=None):
     mean_reward = 0.0
     # Training loop (2 minutes wall clock)
     try:
-        while time() - start_time < 2*60:
+        while time() - start_time < 30*60:
             trainer.evaluate()
             logs = trainer.train()
 
@@ -307,17 +305,13 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent on quadcopter environment")
 
     # Environment parameters
-    parser.add_argument("--num-envs", type=int, default=2048, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=100, help="Number of parallel environments")
     parser.add_argument("--config-path", type=str, default="meteor75_parameters.json", help="Path to quadcopter config")
     parser.add_argument("--max-episode-length", type=int, default=2000, help="Maximum episode length")
-    parser.add_argument("--dt", type=float, default=0.02, help="Simulation timestep")
-    parser.add_argument("--lin-vel-reward-scale", type=float, default=-0.0, help="Linear velocity reward scale")
-    parser.add_argument("--ang-vel-reward-scale", type=float, default=-0.0, help="Angular velocity reward scale")
-    parser.add_argument("--distance-to-goal-reward-scale", type=float, default=15.0, help="Distance to goal reward scale")
-    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.2, help="Dynamics randomization range")
+    parser.add_argument("--dynamics-randomization-delta", type=float, default=0.0, help="Dynamics randomization range")
 
     # Training parameters
-    parser.add_argument("--hidden-size", type=int, default=32, help="Hidden layer size")
+    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size")
     parser.add_argument("--total-timesteps", type=int, default=100_000_000, help="Total training timesteps")
 
     # Logging and checkpointing
