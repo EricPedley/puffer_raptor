@@ -4,3 +4,4 @@ resources
 wandb
 logs
 logs_sac
+checkpoints

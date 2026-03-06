@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from gymnasium import spaces
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.vec_env import VecEnv, VecMonitor
 
 from race_env import QuadcopterRaceEnv
@@ -117,5 +118,22 @@ if __name__ == "__main__":
             tensorboard_log="logs/sb3_race",
         )
 
+    class LogDirCheckpointCallback(CheckpointCallback):
+        def _init_callback(self):
+            self.save_path = self.model.logger.dir
+            super()._init_callback()
+
+    checkpoint_callback = LogDirCheckpointCallback(
+        save_freq=max(1_000_000 // args.num_envs, 1),
+        save_path="logs/sb3_race",  # overridden in _init_callback
+        name_prefix=f"sb3_race_{args.track}",
+        verbose=2,
+    )
+
     print(model.policy)
-    model.learn(total_timesteps=args.total_timesteps, reset_num_timesteps=True, tb_log_name="ppo")
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        reset_num_timesteps=True,
+        tb_log_name="ppo",
+        callback=checkpoint_callback,
+    )
